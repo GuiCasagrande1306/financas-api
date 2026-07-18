@@ -6,6 +6,7 @@ import { transactionsRouter } from './modules/transactions/transactions.routes';
 import { categoriesRouter } from './modules/categories/categories.routes';
 import { summaryRouter } from './modules/summary/summary.routes';
 import { budgetsRouter } from './modules/budgets/budgets.routes';
+import { investmentsRouter } from './modules/investments/investments.routes';
 
 export const routes = Router();
 
@@ -19,3 +20,4 @@ routes.use('/transactions', transactionsRouter);
 routes.use('/categories', categoriesRouter);
 routes.use('/summary', summaryRouter);
 routes.use('/budgets', budgetsRouter);
+routes.use('/investments', investmentsRouter);
