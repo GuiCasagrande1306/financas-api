@@ -27,4 +27,9 @@ services:
       # URL do frontend em produção (ex.: https://financas.vercel.app)
       - key: CORS_ORIGIN
         sync: false
+      # Google Gemini — scan de recibos (chave grátis do AI Studio):
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-flash-latest
     # PORT é injetado automaticamente pelo Render — NÃO defina aqui.

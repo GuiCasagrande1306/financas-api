@@ -63,6 +63,7 @@ Ou New → **Web Service** manual com:
 - Health check: `/health`
 
 **c) Preencha as variáveis** (Environment) — as 4 do Supabase acima + `NODE_ENV=production`
++ `GEMINI_API_KEY` (scan de recibos) + `GEMINI_MODEL=gemini-flash-latest`
 + `CORS_ORIGIN` (a URL do frontend; deixe em branco por ora e volte no passo 5).
 
 **d)** Deploy. A URL final fica tipo `https://financas-api.onrender.com`.
