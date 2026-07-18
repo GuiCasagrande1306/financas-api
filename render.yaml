@@ -1,0 +1,30 @@
+# Blueprint do Render — cria o serviço da API automaticamente.
+# No Render: New → Blueprint → aponta pro repositório. Depois preencha os
+# valores marcados com "sync: false" no painel (eles NÃO ficam no Git).
+services:
+  - type: web
+    name: financas-api
+    runtime: node
+    plan: free
+    region: oregon # free tier: EUA/UE (sem São Paulo). Veja nota sobre latência no README.
+    branch: main
+    # --include=dev garante o TypeScript (devDependency) para o build do tsc.
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Segredos — preencha no painel do Render (nunca commitados):
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      # URL do frontend em produção (ex.: https://financas.vercel.app)
+      - key: CORS_ORIGIN
+        sync: false
+    # PORT é injetado automaticamente pelo Render — NÃO defina aqui.
