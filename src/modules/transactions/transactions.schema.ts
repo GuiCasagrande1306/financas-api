@@ -19,12 +19,21 @@ export const createTransactionSchema = z.object({
 
 export const updateTransactionSchema = createTransactionSchema.partial();
 
+// PAGINAÇÃO: no máximo 50 por página. `limit` é CLAMPADO (não rejeitado) para
+// nunca devolver a base inteira — mesmo que um cliente peça 5000, volta 50.
+const MAX_PAGE = 50;
+
 export const listTransactionsQuery = z.object({
   kind: transactionKind.optional(),
   categoryId: z.string().uuid().optional(),
   from: z.string().date().optional(),
   to: z.string().date().optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(MAX_PAGE)
+    .transform((n) => Math.min(n, MAX_PAGE)),
   offset: z.coerce.number().int().min(0).default(0),
 });
 

@@ -98,6 +98,13 @@ create table if not exists public.transactions (
 create index if not exists idx_tx_user_date  on public.transactions(user_id, occurred_at desc);
 create index if not exists idx_tx_user_cat   on public.transactions(user_id, category_id);
 create index if not exists idx_tx_merchant   on public.transactions(merchant);
+-- Índice PARCIAL para as consultas quentes (resumo mensal + listagem), que
+-- SEMPRE filtram `deleted_at IS NULL`. Fica menor (ignora soft-deletados) e o
+-- Postgres o usa direto no filtro user_id + faixa de occurred_at → resumo e
+-- paginação escalam mesmo com anos de histórico.
+create index if not exists idx_tx_user_date_active
+  on public.transactions(user_id, occurred_at desc)
+  where deleted_at is null;
 
 drop trigger if exists trg_tx_updated on public.transactions;
 create trigger trg_tx_updated before update on public.transactions
