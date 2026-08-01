@@ -1,6 +1,7 @@
 import { createApp } from './app';
 import { env } from './env';
 import { pool } from './db/pool';
+import { startIndicatorsScheduler } from './lib/scheduler';
 
 async function main() {
   // Valida a conexão com o banco antes de aceitar tráfego (fail-fast).
@@ -16,6 +17,9 @@ async function main() {
   const server = app.listen(env.PORT, () => {
     console.log(`🚀 API de finanças rodando em http://localhost:${env.PORT}`);
   });
+
+  // Robô das taxas do BCB (atualiza no boot + agenda 03:00).
+  startIndicatorsScheduler();
 
   // Encerramento gracioso: para de aceitar conexões e fecha o pool.
   const shutdown = (signal: string) => {

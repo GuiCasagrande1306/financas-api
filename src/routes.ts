@@ -7,11 +7,15 @@ import { categoriesRouter } from './modules/categories/categories.routes';
 import { summaryRouter } from './modules/summary/summary.routes';
 import { budgetsRouter } from './modules/budgets/budgets.routes';
 import { investmentsRouter } from './modules/investments/investments.routes';
+import { indicatorsRouter } from './modules/indicators/indicators.routes';
 
 export const routes = Router();
 
 // Rotas de autenticação são PÚBLICAS (signup/signin), com rate-limit anti-brute-force.
 routes.use('/auth', authLimiter, authRouter);
+
+// Indicadores econômicos (BCB) são PÚBLICOS — antes do middleware de auth.
+routes.use('/indicators', indicatorsRouter);
 
 // Daqui pra baixo, toda rota exige um usuário autenticado.
 routes.use(authenticate);

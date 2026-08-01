@@ -156,13 +156,33 @@ create table if not exists public.investments (
                            'previdencia','outros'
                          )),
   invested_amount      bigint not null default 0 check (invested_amount >= 0), -- custo de aquisição (CENTAVOS)
-  current_amount       bigint not null default 0 check (current_amount >= 0),  -- valor de mercado hoje (CENTAVOS)
-  expected_annual_rate numeric(6,2) not null default 0,       -- rendimento esperado % a.a. (ex.: 12.50)
+  current_amount       bigint not null default 0 check (current_amount >= 0),  -- valor manual/fallback (CENTAVOS)
+  expected_annual_rate numeric(6,2) not null default 0,       -- pré: % a.a. | pós: % do indicador (ex.: 110)
+  yield_type           text not null default 'pre'
+                         check (yield_type in ('pre','cdi','selic')),  -- tipo de rendimento
+  purchase_date        date,                                  -- data da compra (NULL = ativo manual/legado)
   notes                text,
   created_at           timestamptz not null default now(),
   updated_at           timestamptz not null default now()
 );
 create index if not exists idx_investments_user on public.investments(user_id);
+
+-- Colunas de rendimento inteligente (idempotente p/ tabelas já existentes).
+alter table public.investments
+  add column if not exists yield_type text not null default 'pre'
+    check (yield_type in ('pre','cdi','selic'));
+alter table public.investments add column if not exists purchase_date date;
+
+-- ===========================================================================
+-- ECONOMIC INDICATORS (taxas oficiais do BCB — SELIC/CDI; atualizadas por cron)
+-- Dados públicos (não são por usuário). O backend lê/escreve; a rota
+-- GET /indicators é pública. `current_rate` em % ao ano.
+-- ===========================================================================
+create table if not exists public.economic_indicators (
+  name         text primary key check (name in ('SELIC','CDI')),
+  current_rate numeric(7,2) not null,
+  last_updated timestamptz not null default now()
+);
 
 drop trigger if exists trg_investments_updated on public.investments;
 create trigger trg_investments_updated before update on public.investments
@@ -199,6 +219,11 @@ alter table public.transactions enable row level security;
 alter table public.budgets      enable row level security;
 alter table public.merchant_rules enable row level security;
 alter table public.investments  enable row level security;
+alter table public.economic_indicators enable row level security;
+
+-- economic_indicators: dado público → leitura liberada; escrita só via backend.
+drop policy if exists "read indicators" on public.economic_indicators;
+create policy "read indicators" on public.economic_indicators for select using (true);
 
 -- profiles: cada um enxerga/edita só a si mesmo
 drop policy if exists "own profile" on public.profiles;
