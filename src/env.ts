@@ -21,6 +21,10 @@ const schema = z.object({
   // Google Gemini — usado no scan de recibos (/transactions/scan).
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().optional(),
+  // Pluggy (Open Finance). Sem elas, a conexão bancária responde erro claro.
+  PLUGGY_CLIENT_ID: z.string().optional(),
+  PLUGGY_CLIENT_SECRET: z.string().optional(),
+  PLUGGY_WEBHOOK_SECRET: z.string().optional(), // valida o webhook (opcional)
   AUTH_DEV_BYPASS_USER_ID: z
     .string()
     .uuid()

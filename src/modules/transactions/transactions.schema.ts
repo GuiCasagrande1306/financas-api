@@ -15,6 +15,8 @@ export const createTransactionSchema = z.object({
   merchant: z.string().max(120).nullish(),
   occurredAt: z.string().date().optional(), // 'YYYY-MM-DD', default = hoje
   notes: z.string().max(1000).nullish(),
+  creditCardId: z.string().uuid().nullish(), // gasto no crédito (senão débito/dinheiro)
+  installments: z.string().max(10).nullish(), // ex.: "1/10"
 });
 
 export const updateTransactionSchema = createTransactionSchema.partial();

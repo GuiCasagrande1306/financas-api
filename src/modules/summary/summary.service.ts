@@ -35,7 +35,8 @@ export async function getSummary(userId: string, month?: string) {
           (SELECT COALESCE(SUM(initial_balance), 0)
              FROM accounts WHERE user_id = $1 AND is_archived = false)
           + COALESCE(SUM(amount) FILTER (WHERE kind = 'income'), 0)
-          - COALESCE(SUM(amount) FILTER (WHERE kind = 'expense'), 0)
+          -- Gastos no CARTÃO não saem da conta (dívida futura) → não entram no saldo.
+          - COALESCE(SUM(amount) FILTER (WHERE kind = 'expense' AND credit_card_id IS NULL), 0)
        )::bigint AS balance
        FROM transactions
       WHERE user_id = $1 AND deleted_at IS NULL`,

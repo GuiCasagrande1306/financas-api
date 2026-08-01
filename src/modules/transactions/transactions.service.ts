@@ -22,6 +22,8 @@ const TX_COLUMNS = `
   receipt_url         AS "receiptUrl",
   is_auto_categorized AS "isAutoCategorized",
   notes,
+  credit_card_id      AS "creditCardId",
+  installments,
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `;
@@ -74,8 +76,9 @@ export async function createTransaction(userId: string, input: CreateTransaction
 
   const rows = await query(
     `INSERT INTO transactions
-       (user_id, account_id, category_id, amount, kind, description, merchant, occurred_at, notes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::date, current_date), $9)
+       (user_id, account_id, category_id, amount, kind, description, merchant,
+        occurred_at, notes, credit_card_id, installments)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::date, current_date), $9, $10, $11)
      RETURNING ${TX_COLUMNS}`,
     [
       userId,
@@ -87,6 +90,8 @@ export async function createTransaction(userId: string, input: CreateTransaction
       input.merchant ?? null,
       input.occurredAt ?? null,
       input.notes ?? null,
+      input.creditCardId ?? null,
+      input.installments ?? null,
     ],
   );
   return rows[0];
@@ -173,6 +178,8 @@ export async function updateTransaction(
   if (input.merchant !== undefined) fields.merchant = input.merchant;
   if (input.occurredAt !== undefined) fields.occurred_at = input.occurredAt;
   if (input.notes !== undefined) fields.notes = input.notes;
+  if (input.creditCardId !== undefined) fields.credit_card_id = input.creditCardId;
+  if (input.installments !== undefined) fields.installments = input.installments;
 
   const keys = Object.keys(fields);
   if (keys.length === 0) return getTransaction(userId, id);

@@ -189,6 +189,46 @@ create trigger trg_investments_updated before update on public.investments
   for each row execute function public.set_updated_at();
 
 -- ===========================================================================
+-- CREDIT CARDS (cartões de crédito — dívida futura, separada do saldo em conta)
+-- `limit` é palavra reservada no SQL → coluna `card_limit`. Valores em CENTAVOS.
+-- ===========================================================================
+create table if not exists public.credit_cards (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null references public.profiles(id) on delete cascade,
+  name         text not null,                                    -- ex.: "Nubank"
+  card_limit   bigint not null default 0 check (card_limit >= 0), -- limite total (CENTAVOS)
+  closing_day  int not null check (closing_day between 1 and 31), -- dia de fechamento
+  due_day      int not null check (due_day between 1 and 31),     -- dia de vencimento
+  last_digits  text,                                             -- final do número (opcional)
+  color        text not null default '#7c3aed',
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create index if not exists idx_cards_user on public.credit_cards(user_id);
+
+drop trigger if exists trg_cards_updated on public.credit_cards;
+create trigger trg_cards_updated before update on public.credit_cards
+  for each row execute function public.set_updated_at();
+
+-- TRANSACTIONS: vínculo opcional com cartão de crédito + parcelamento.
+alter table public.transactions
+  add column if not exists credit_card_id uuid references public.credit_cards(id) on delete set null;
+alter table public.transactions add column if not exists installments text; -- ex.: "1/10"
+create index if not exists idx_tx_card on public.transactions(credit_card_id);
+
+-- OPEN FINANCE: id externo (Pluggy) p/ deduplicar transações importadas.
+alter table public.transactions add column if not exists external_id text;
+create unique index if not exists uniq_tx_external
+  on public.transactions(user_id, external_id) where external_id is not null;
+
+-- Mapeia o "item" (conexão bancária) da Pluggy ao nosso usuário (webhook usa isso).
+create table if not exists public.pluggy_items (
+  item_id    text primary key,
+  user_id    uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+-- ===========================================================================
 -- SEED: categorias padrão do sistema (user_id NULL, visíveis a todos)
 -- ===========================================================================
 insert into public.categories (user_id, name, icon, color, kind, sort_order) values
@@ -219,7 +259,12 @@ alter table public.transactions enable row level security;
 alter table public.budgets      enable row level security;
 alter table public.merchant_rules enable row level security;
 alter table public.investments  enable row level security;
+alter table public.credit_cards enable row level security;
 alter table public.economic_indicators enable row level security;
+
+drop policy if exists "own cards" on public.credit_cards;
+create policy "own cards" on public.credit_cards
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- economic_indicators: dado público → leitura liberada; escrita só via backend.
 drop policy if exists "read indicators" on public.economic_indicators;
