@@ -232,7 +232,11 @@ create trigger trg_cards_updated before update on public.credit_cards
 alter table public.transactions
   add column if not exists credit_card_id uuid references public.credit_cards(id) on delete set null;
 alter table public.transactions add column if not exists installments text; -- ex.: "1/10"
+-- Amarra todas as parcelas de UMA compra (mesmo UUID) → exclusão em massa.
+alter table public.transactions add column if not exists installment_group_id uuid;
 create index if not exists idx_tx_card on public.transactions(credit_card_id);
+create index if not exists idx_tx_installment_group
+  on public.transactions(installment_group_id) where installment_group_id is not null;
 
 -- OPEN FINANCE: id externo (Pluggy) p/ deduplicar transações importadas.
 alter table public.transactions add column if not exists external_id text;

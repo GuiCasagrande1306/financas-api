@@ -44,6 +44,11 @@ export const listTransactionsQuery = z.object({
 
 export const idParam = z.object({ id: z.string().uuid() });
 
+// Exclusão: 'single' apaga só a transação; 'all' apaga esta e as parcelas futuras.
+export const deleteTransactionQuery = z.object({
+  mode: z.enum(['single', 'all']).default('single'),
+});
+
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
 export type UpdateTransactionInput = z.infer<typeof updateTransactionSchema>;
 export type ListTransactionsQuery = z.infer<typeof listTransactionsQuery>;

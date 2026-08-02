@@ -11,6 +11,7 @@ import {
   updateTransactionSchema,
   listTransactionsQuery,
   idParam,
+  deleteTransactionQuery,
   type ListTransactionsQuery,
 } from './transactions.schema';
 
@@ -92,12 +93,13 @@ transactionsRouter.patch(
   }),
 );
 
-// DELETE /api/transactions/:id — soft delete
+// DELETE /api/transactions/:id?mode=single|all — soft delete (mode=all apaga esta + futuras)
 transactionsRouter.delete(
   '/:id',
-  validate({ params: idParam }),
+  validate({ params: idParam, query: deleteTransactionQuery }),
   asyncHandler(async (req, res) => {
-    await service.deleteTransaction(requireUserId(req), req.params.id);
-    res.status(204).send();
+    const { mode } = req.query as unknown as { mode: 'single' | 'all' };
+    const deleted = await service.deleteTransaction(requireUserId(req), req.params.id, mode);
+    res.json({ deleted });
   }),
 );

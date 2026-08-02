@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
 import type {
@@ -24,6 +25,7 @@ const TX_COLUMNS = `
   notes,
   credit_card_id      AS "creditCardId",
   installments,
+  installment_group_id AS "installmentGroupId",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `;
@@ -128,6 +130,8 @@ export async function createTransaction(userId: string, input: CreateTransaction
   // a sobra vai na 1ª parcela para que a soma feche exatamente com o total.
   const base = Math.floor(input.amount / parcels);
   const remainder = input.amount - base * parcels;
+  // Mesmo id em TODAS as parcelas desta compra → permite apagá-las em massa depois.
+  const groupId = randomUUID();
 
   const tuples: string[] = [];
   const params: unknown[] = [];
@@ -139,7 +143,7 @@ export async function createTransaction(userId: string, input: CreateTransaction
 
     const o = params.length;
     tuples.push(
-      `($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, $${o + 6}, $${o + 7}, $${o + 8}::date, $${o + 9}, $${o + 10}, $${o + 11})`,
+      `($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, $${o + 6}, $${o + 7}, $${o + 8}::date, $${o + 9}, $${o + 10}, $${o + 11}, $${o + 12})`,
     );
     params.push(
       userId,
@@ -153,6 +157,7 @@ export async function createTransaction(userId: string, input: CreateTransaction
       input.notes ?? null,
       input.creditCardId ?? null,
       label,
+      groupId,
     );
   }
 
@@ -160,7 +165,7 @@ export async function createTransaction(userId: string, input: CreateTransaction
   const rows = await query(
     `INSERT INTO transactions
        (user_id, account_id, category_id, amount, kind, description, merchant,
-        occurred_at, notes, credit_card_id, installments)
+        occurred_at, notes, credit_card_id, installments, installment_group_id)
      VALUES ${tuples.join(', ')}
      RETURNING ${TX_COLUMNS}`,
     params,
@@ -276,13 +281,45 @@ export async function updateTransaction(
   return rows[0];
 }
 
-/** Soft delete: nunca apagamos dinheiro de verdade — só marcamos deleted_at. */
-export async function deleteTransaction(userId: string, id: string): Promise<void> {
-  const rows = await query(
+/**
+ * Soft delete: nunca apagamos dinheiro de verdade — só marcamos deleted_at.
+ * mode='all' + parcela: apaga ESTA e as FUTURAS da mesma compra (mesmo
+ * installment_group_id e data >= a da clicada). Retorna quantas foram apagadas.
+ */
+export async function deleteTransaction(
+  userId: string,
+  id: string,
+  mode: 'single' | 'all' = 'single',
+): Promise<number> {
+  if (mode === 'all') {
+    const found = await query<{ groupId: string | null; occurredAt: string }>(
+      `SELECT installment_group_id AS "groupId", occurred_at AS "occurredAt"
+         FROM transactions
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+      [id, userId],
+    );
+    if (found.length === 0) throw AppError.notFound('Transação não encontrada');
+
+    const { groupId, occurredAt } = found[0];
+    if (groupId) {
+      const deleted = await query<{ id: string }>(
+        `UPDATE transactions SET deleted_at = now()
+          WHERE user_id = $1 AND installment_group_id = $2
+            AND occurred_at >= $3::date AND deleted_at IS NULL
+          RETURNING id`,
+        [userId, groupId, occurredAt],
+      );
+      return deleted.length;
+    }
+    // Sem grupo (compra à vista ou parcela antiga) → cai no comportamento padrão.
+  }
+
+  const rows = await query<{ id: string }>(
     `UPDATE transactions SET deleted_at = now()
       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
       RETURNING id`,
     [id, userId],
   );
   if (rows.length === 0) throw AppError.notFound('Transação não encontrada');
+  return 1;
 }
