@@ -29,6 +29,8 @@ const MAX_PAGE = 50;
 export const listTransactionsQuery = z.object({
   kind: transactionKind.optional(),
   categoryId: z.string().uuid().optional(),
+  // Busca parcial case-insensitive na descrição/estabelecimento (ILIKE '%termo%').
+  search: z.string().trim().max(100).optional(),
   from: z.string().date().optional(),
   to: z.string().date().optional(),
   limit: z.coerce

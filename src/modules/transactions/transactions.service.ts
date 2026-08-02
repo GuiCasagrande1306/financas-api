@@ -180,6 +180,11 @@ export async function listTransactions(userId: string, filters: ListTransactions
     params.push(filters.categoryId);
     where.push(`category_id = $${params.length}`);
   }
+  if (filters.search) {
+    // Busca parcial case-insensitive no nome (descrição) e no estabelecimento.
+    params.push(`%${filters.search}%`);
+    where.push(`(description ILIKE $${params.length} OR merchant ILIKE $${params.length})`);
+  }
   if (filters.from) {
     params.push(filters.from);
     where.push(`occurred_at >= $${params.length}::date`);

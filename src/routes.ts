@@ -11,6 +11,7 @@ import { indicatorsRouter } from './modules/indicators/indicators.routes';
 import { creditCardsRouter } from './modules/credit-cards/credit-cards.routes';
 import { openFinanceRouter, openFinanceWebhookRouter } from './modules/open-finance/open-finance.routes';
 import { reportsRouter } from './modules/reports/reports.routes';
+import { aiRouter } from './modules/ai/ai.routes';
 
 export const routes = Router();
 
@@ -33,3 +34,4 @@ routes.use('/budgets', budgetsRouter);
 routes.use('/investments', investmentsRouter);
 routes.use('/credit-cards', creditCardsRouter);
 routes.use('/open-finance', openFinanceRouter);
+routes.use('/ai', aiRouter);
