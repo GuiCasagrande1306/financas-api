@@ -13,6 +13,7 @@ import { openFinanceRouter, openFinanceWebhookRouter } from './modules/open-fina
 import { reportsRouter } from './modules/reports/reports.routes';
 import { aiRouter } from './modules/ai/ai.routes';
 import { recurringRouter } from './modules/recurring/recurring.routes';
+import { forecastRouter } from './modules/forecast/forecast.routes';
 
 export const routes = Router();
 
@@ -37,3 +38,4 @@ routes.use('/credit-cards', creditCardsRouter);
 routes.use('/open-finance', openFinanceRouter);
 routes.use('/ai', aiRouter);
 routes.use('/recurring', recurringRouter);
+routes.use('/forecast', forecastRouter);
