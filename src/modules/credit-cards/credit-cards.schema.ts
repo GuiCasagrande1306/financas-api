@@ -14,5 +14,13 @@ export const updateCardSchema = createCardSchema.partial();
 
 export const idParam = z.object({ id: z.string().uuid() });
 
+// Mês de referência da fatura ('YYYY-MM'). Ausente => fatura aberta (atual).
+export const invoiceQuery = z.object({
+  month: z
+    .string()
+    .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Formato esperado: YYYY-MM')
+    .optional(),
+});
+
 export type CreateCardInput = z.infer<typeof createCardSchema>;
 export type UpdateCardInput = z.infer<typeof updateCardSchema>;

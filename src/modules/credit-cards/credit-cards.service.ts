@@ -135,13 +135,49 @@ export async function deleteCard(userId: string, id: string): Promise<void> {
   if (rows.length === 0) throw AppError.notFound('Cartão não encontrado');
 }
 
+type InvoiceStatus = 'closed' | 'current' | 'future';
+
+/** Janela (start..end) da fatura que FECHA no mês (year, monthIndex 0–11). */
+function cycleForMonth(closingDay: number, year: number, monthIndex: number): { start: string; end: string } {
+  const closeThis = clampDay(year, monthIndex, closingDay);
+  const prevClose = clampDay(year, monthIndex - 1, closingDay);
+  return {
+    start: isoUTC(new Date(Date.UTC(year, monthIndex - 1, prevClose + 1))),
+    end: isoUTC(new Date(Date.UTC(year, monthIndex, closeThis))),
+  };
+}
+
+/** Mês de referência (YYYY-MM) da fatura ABERTA hoje = mês em que ela fecha. */
+function currentInvoiceMonth(closingDay: number, ref = new Date()): string {
+  const end = currentCycle(closingDay, ref).end; // 'YYYY-MM-DD'
+  return end.slice(0, 7);
+}
+
+/** closed: já fechou; current: aberta (hoje dentro do ciclo); future: ainda vai abrir. */
+function invoiceStatus(start: string, end: string): InvoiceStatus {
+  const today = isoUTC(new Date());
+  if (today > end) return 'closed';
+  if (today >= start) return 'current';
+  return 'future';
+}
+
+/** Vencimento da fatura: no mês do fechamento se o dia vier depois; senão, no mês seguinte. */
+function dueDateFor(closingDay: number, dueDay: number, year: number, monthIndex: number): string {
+  const dueMonth = dueDay > closingDay ? monthIndex : monthIndex + 1;
+  return isoUTC(new Date(Date.UTC(year, dueMonth, clampDay(year, dueMonth, dueDay))));
+}
+
 /**
- * Fatura atual detalhada de um cartão: total, janela do ciclo, dia de
- * vencimento e as transações que a compõem.
+ * Fatura detalhada de um cartão num mês de referência (default = fatura aberta).
+ * Retorna a janela do ciclo, vencimento, status, total e as transações.
  */
-export async function getInvoice(userId: string, cardId: string) {
+export async function getInvoice(userId: string, cardId: string, monthRef?: string) {
   const card = await getCard(userId, cardId);
-  const { start, end } = currentCycle(card.closingDay);
+  const ref = monthRef ?? currentInvoiceMonth(card.closingDay);
+  const [year, month1] = ref.split('-').map(Number);
+  const monthIndex = month1 - 1;
+
+  const { start, end } = cycleForMonth(card.closingDay, year, monthIndex);
 
   const transactions = await query(
     `SELECT id, category_id AS "categoryId", amount, description, merchant,
@@ -158,10 +194,66 @@ export async function getInvoice(userId: string, cardId: string) {
   return {
     cardId,
     cardName: card.name,
+    month: ref,
     cycleStart: start,
     cycleEnd: end,
-    dueDay: card.dueDay,
+    dueDate: dueDateFor(card.closingDay, card.dueDay, year, monthIndex),
+    status: invoiceStatus(start, end),
     total,
     transactions,
+  };
+}
+
+/**
+ * Resumo de TODAS as faturas do cartão (fechadas, atual e futuras), agrupando as
+ * transações pelo ciclo de fechamento. A fatura aberta entra mesmo sem gastos.
+ */
+export async function listInvoices(userId: string, cardId: string) {
+  const card = await getCard(userId, cardId);
+
+  const rows = await query<{ month: string; total: number; count: number }>(
+    `SELECT to_char(
+              CASE WHEN extract(day from occurred_at)::int > $3
+                   THEN date_trunc('month', occurred_at) + interval '1 month'
+                   ELSE date_trunc('month', occurred_at) END, 'YYYY-MM') AS month,
+            COALESCE(SUM(amount), 0)::bigint AS total,
+            COUNT(*)::int AS count
+       FROM transactions
+      WHERE user_id = $1 AND credit_card_id = $2 AND deleted_at IS NULL AND kind = 'expense'
+      GROUP BY 1`,
+    [userId, cardId, card.closingDay],
+  );
+
+  const current = currentInvoiceMonth(card.closingDay);
+  const byKey = new Map(rows.map((r) => [r.month, r]));
+  if (!byKey.has(current)) rows.push({ month: current, total: 0, count: 0 });
+
+  const invoices = rows
+    .sort((a, b) => (a.month < b.month ? -1 : 1))
+    .map((r) => {
+      const [y, m1] = r.month.split('-').map(Number);
+      const { start, end } = cycleForMonth(card.closingDay, y, m1 - 1);
+      return {
+        month: r.month,
+        total: r.total,
+        count: r.count,
+        cycleStart: start,
+        cycleEnd: end,
+        dueDate: dueDateFor(card.closingDay, card.dueDay, y, m1 - 1),
+        status: invoiceStatus(start, end),
+      };
+    });
+
+  return {
+    card: {
+      id: card.id,
+      name: card.name,
+      limit: card.limit,
+      color: card.color,
+      closingDay: card.closingDay,
+      dueDay: card.dueDay,
+    },
+    current,
+    invoices,
   };
 }

@@ -3,7 +3,7 @@ import { asyncHandler } from '../../lib/asyncHandler';
 import { validate } from '../../middlewares/validate';
 import { requireUserId } from '../../middlewares/auth';
 import * as service from './credit-cards.service';
-import { createCardSchema, updateCardSchema, idParam } from './credit-cards.schema';
+import { createCardSchema, updateCardSchema, idParam, invoiceQuery } from './credit-cards.schema';
 
 export const creditCardsRouter = Router();
 
@@ -24,12 +24,22 @@ creditCardsRouter.post(
   }),
 );
 
-// GET /api/credit-cards/:id/invoice — fatura atual detalhada
+// GET /api/credit-cards/:id/invoices — resumo de todas as faturas (fechada/atual/futura)
 creditCardsRouter.get(
-  '/:id/invoice',
+  '/:id/invoices',
   validate({ params: idParam }),
   asyncHandler(async (req, res) => {
-    res.json(await service.getInvoice(requireUserId(req), req.params.id));
+    res.json(await service.listInvoices(requireUserId(req), req.params.id));
+  }),
+);
+
+// GET /api/credit-cards/:id/invoice?month=YYYY-MM — fatura detalhada (default = atual)
+creditCardsRouter.get(
+  '/:id/invoice',
+  validate({ params: idParam, query: invoiceQuery }),
+  asyncHandler(async (req, res) => {
+    const { month } = req.query as unknown as { month?: string };
+    res.json(await service.getInvoice(requireUserId(req), req.params.id, month));
   }),
 );
 
