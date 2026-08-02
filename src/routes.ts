@@ -10,6 +10,7 @@ import { investmentsRouter } from './modules/investments/investments.routes';
 import { indicatorsRouter } from './modules/indicators/indicators.routes';
 import { creditCardsRouter } from './modules/credit-cards/credit-cards.routes';
 import { openFinanceRouter, openFinanceWebhookRouter } from './modules/open-finance/open-finance.routes';
+import { reportsRouter } from './modules/reports/reports.routes';
 
 export const routes = Router();
 
@@ -27,6 +28,7 @@ routes.use(authenticate);
 routes.use('/transactions', transactionsRouter);
 routes.use('/categories', categoriesRouter);
 routes.use('/summary', summaryRouter);
+routes.use('/reports', reportsRouter);
 routes.use('/budgets', budgetsRouter);
 routes.use('/investments', investmentsRouter);
 routes.use('/credit-cards', creditCardsRouter);
