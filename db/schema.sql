@@ -204,6 +204,24 @@ create table if not exists public.credit_cards (
   created_at   timestamptz not null default now(),
   updated_at   timestamptz not null default now()
 );
+
+-- Assinaturas / contas fixas recorrentes (Radar de Assinaturas).
+-- O app lança sozinho um gasto por mês no dia do vencimento (via last_posted).
+create table if not exists public.recurring_expenses (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null references public.profiles(id) on delete cascade,
+  name         text not null,                                   -- ex.: "Netflix"
+  amount       bigint not null check (amount > 0),              -- valor mensal (CENTAVOS)
+  due_day      int not null check (due_day between 1 and 31),   -- dia de vencimento
+  category_id  uuid references public.categories(id) on delete set null,
+  color        text not null default '#6366f1',
+  icon         text,                                            -- ícone lucide (opcional)
+  is_active    boolean not null default true,
+  last_posted  date,                                            -- data do último lançamento automático
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create index if not exists idx_recurring_user on public.recurring_expenses(user_id);
 create index if not exists idx_cards_user on public.credit_cards(user_id);
 
 drop trigger if exists trg_cards_updated on public.credit_cards;
@@ -264,6 +282,11 @@ alter table public.economic_indicators enable row level security;
 
 drop policy if exists "own cards" on public.credit_cards;
 create policy "own cards" on public.credit_cards
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+alter table public.recurring_expenses enable row level security;
+drop policy if exists "own recurring" on public.recurring_expenses;
+create policy "own recurring" on public.recurring_expenses
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- economic_indicators: dado público → leitura liberada; escrita só via backend.
