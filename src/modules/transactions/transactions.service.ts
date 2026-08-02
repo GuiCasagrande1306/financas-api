@@ -70,31 +70,102 @@ async function assertCategoryValid(userId: string, categoryId?: string | null): 
   if (rows.length === 0) throw AppError.badRequest('Categoria inválida');
 }
 
+/** Data de hoje ('YYYY-MM-DD'), no fuso do servidor (espelha o current_date do banco). */
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Soma `add` meses a uma data 'YYYY-MM-DD' com CLAMP no fim do mês.
+ * Ex.: 31/01 + 1 mês => 28/02 (nunca "vaza" para 03/03 como o Date puro faria).
+ */
+function addMonthsISO(iso: string, add: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const idx = m - 1 + add;
+  const year = y + Math.floor(idx / 12);
+  const month = ((idx % 12) + 12) % 12; // 0–11
+  const lastDay = new Date(year, month + 1, 0).getDate();
+  const day = Math.min(d, lastDay);
+  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
 export async function createTransaction(userId: string, input: CreateTransactionInput) {
   const accountId = await resolveAccountId(userId, input.accountId);
   await assertCategoryValid(userId, input.categoryId);
 
+  const kind = input.kind ?? 'expense';
+  const parcels = input.installments ?? 1;
+  const baseDate = input.occurredAt ?? todayISO();
+  const baseDesc = (input.description ?? '').trim();
+
+  // À vista (1x): uma única transação, como sempre.
+  if (parcels <= 1) {
+    const rows = await query(
+      `INSERT INTO transactions
+         (user_id, account_id, category_id, amount, kind, description, merchant,
+          occurred_at, notes, credit_card_id, installments)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11)
+       RETURNING ${TX_COLUMNS}`,
+      [
+        userId,
+        accountId,
+        input.categoryId ?? null,
+        input.amount,
+        kind,
+        input.description ?? null,
+        input.merchant ?? null,
+        baseDate,
+        input.notes ?? null,
+        input.creditCardId ?? null,
+        null,
+      ],
+    );
+    return rows[0];
+  }
+
+  // Parcelado: fatia o TOTAL em N parcelas. A divisão em centavos pode sobrar —
+  // a sobra vai na 1ª parcela para que a soma feche exatamente com o total.
+  const base = Math.floor(input.amount / parcels);
+  const remainder = input.amount - base * parcels;
+
+  const tuples: string[] = [];
+  const params: unknown[] = [];
+  for (let i = 1; i <= parcels; i++) {
+    const amount = i === 1 ? base + remainder : base;
+    const occurredAt = addMonthsISO(baseDate, i - 1); // parcela 1 = mês base, 2 = +1 mês…
+    const label = `${i}/${parcels}`;
+    const description = baseDesc ? `${baseDesc} (${label})` : `Parcela ${label}`;
+
+    const o = params.length;
+    tuples.push(
+      `($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, $${o + 6}, $${o + 7}, $${o + 8}::date, $${o + 9}, $${o + 10}, $${o + 11})`,
+    );
+    params.push(
+      userId,
+      accountId,
+      input.categoryId ?? null,
+      amount,
+      kind,
+      description,
+      input.merchant ?? null,
+      occurredAt,
+      input.notes ?? null,
+      input.creditCardId ?? null,
+      label,
+    );
+  }
+
+  // Bulk insert: todas as parcelas de uma vez.
   const rows = await query(
     `INSERT INTO transactions
        (user_id, account_id, category_id, amount, kind, description, merchant,
         occurred_at, notes, credit_card_id, installments)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::date, current_date), $9, $10, $11)
+     VALUES ${tuples.join(', ')}
      RETURNING ${TX_COLUMNS}`,
-    [
-      userId,
-      accountId,
-      input.categoryId ?? null,
-      input.amount,
-      input.kind ?? 'expense',
-      input.description ?? null,
-      input.merchant ?? null,
-      input.occurredAt ?? null,
-      input.notes ?? null,
-      input.creditCardId ?? null,
-      input.installments ?? null,
-    ],
+    params,
   );
-  return rows[0];
+  return rows[0]; // a resposta 201 devolve a 1ª parcela
 }
 
 export async function listTransactions(userId: string, filters: ListTransactionsQuery) {
@@ -179,7 +250,7 @@ export async function updateTransaction(
   if (input.occurredAt !== undefined) fields.occurred_at = input.occurredAt;
   if (input.notes !== undefined) fields.notes = input.notes;
   if (input.creditCardId !== undefined) fields.credit_card_id = input.creditCardId;
-  if (input.installments !== undefined) fields.installments = input.installments;
+  // `installments` não é editável: o rótulo da parcela ("2/4") é definido na criação.
 
   const keys = Object.keys(fields);
   if (keys.length === 0) return getTransaction(userId, id);
