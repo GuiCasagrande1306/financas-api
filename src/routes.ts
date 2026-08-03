@@ -14,6 +14,7 @@ import { reportsRouter } from './modules/reports/reports.routes';
 import { aiRouter } from './modules/ai/ai.routes';
 import { recurringRouter } from './modules/recurring/recurring.routes';
 import { forecastRouter } from './modules/forecast/forecast.routes';
+import { achievementsRouter } from './modules/achievements/achievements.routes';
 
 export const routes = Router();
 
@@ -39,3 +40,4 @@ routes.use('/open-finance', openFinanceRouter);
 routes.use('/ai', aiRouter);
 routes.use('/recurring', recurringRouter);
 routes.use('/forecast', forecastRouter);
+routes.use('/achievements', achievementsRouter);
