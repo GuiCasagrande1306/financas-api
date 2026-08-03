@@ -222,6 +222,21 @@ create table if not exists public.recurring_expenses (
   updated_at   timestamptz not null default now()
 );
 create index if not exists idx_recurring_user on public.recurring_expenses(user_id);
+
+-- Metas de economia ("Caixinhas"): objetivo + quanto já foi guardado.
+create table if not exists public.goals (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null references public.profiles(id) on delete cascade,
+  title          text not null,                                        -- ex.: "Viagem para a praia"
+  target_amount  bigint not null check (target_amount > 0),            -- objetivo (CENTAVOS)
+  current_amount bigint not null default 0 check (current_amount >= 0),-- já guardado (CENTAVOS)
+  deadline       date,                                                 -- prazo (opcional)
+  icon           text,                                                 -- ícone lucide (opcional)
+  color          text not null default '#10b981',
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+create index if not exists idx_goals_user on public.goals(user_id);
 create index if not exists idx_cards_user on public.credit_cards(user_id);
 
 drop trigger if exists trg_cards_updated on public.credit_cards;
@@ -291,6 +306,11 @@ create policy "own cards" on public.credit_cards
 alter table public.recurring_expenses enable row level security;
 drop policy if exists "own recurring" on public.recurring_expenses;
 create policy "own recurring" on public.recurring_expenses
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+alter table public.goals enable row level security;
+drop policy if exists "own goals" on public.goals;
+create policy "own goals" on public.goals
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- economic_indicators: dado público → leitura liberada; escrita só via backend.
