@@ -1,5 +1,6 @@
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
+import { currentMonthSP } from '../../lib/dates';
 import type { UpsertBudgetInput } from './budgets.schema';
 
 // Limiar do alerta amarelo. Abaixo = verde; a partir de 100% = vermelho (estourou).
@@ -26,10 +27,8 @@ interface BudgetRow {
  * Valores em CENTAVOS. O gasto é sempre do mês pedido; o teto é recorrente.
  */
 export async function listBudgets(userId: string, month?: string) {
-  const now = new Date();
-  const monthStart = month
-    ? `${month}-01`
-    : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
+  // Sem mês → mês corrente em America/Sao_Paulo.
+  const monthStart = `${month ?? currentMonthSP()}-01`;
 
   const rows = await query<BudgetRow>(
     `SELECT b.id,

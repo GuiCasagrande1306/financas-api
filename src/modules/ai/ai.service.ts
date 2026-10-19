@@ -1,6 +1,7 @@
 import { env } from '../../env';
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
+import { todaySP } from '../../lib/dates';
 import { getInvestmentsSummary } from '../investments/investments.service';
 
 const GEMINI_MODEL = env.GEMINI_MODEL || 'gemini-flash-latest';
@@ -23,8 +24,11 @@ interface CategoryRow {
  * Monta, em texto simples, o "Resumo Financeiro" do usuário (últimos 30 dias +
  * patrimônio) que será injetado como contexto na instrução de sistema do Gemini.
  * As agregações rodam no banco (SUM/GROUP BY) e em paralelo (Promise.all).
+ * Janela = os 30 dias até HOJE em America/Sao_Paulo (nunca o current_date do
+ * servidor), sem lançamentos futuros (parcelas e agendados não contam).
  */
 async function buildContext(userId: string): Promise<string> {
+  const today = todaySP();
   const [totalsRows, topCats, invSummary] = await Promise.all([
     query<TotalsRow>(
       `SELECT
@@ -32,19 +36,21 @@ async function buildContext(userId: string): Promise<string> {
          COALESCE(SUM(amount) FILTER (WHERE kind = 'expense'), 0)::bigint AS expense
        FROM transactions
       WHERE user_id = $1 AND deleted_at IS NULL
-        AND occurred_at >= current_date - interval '30 days'`,
-      [userId],
+        AND occurred_at >= $2::date - interval '30 days'
+        AND occurred_at <= $2::date`,
+      [userId, today],
     ),
     query<CategoryRow>(
       `SELECT c.name, COALESCE(SUM(t.amount), 0)::bigint AS total
          FROM transactions t
          JOIN categories c ON c.id = t.category_id
         WHERE t.user_id = $1 AND t.deleted_at IS NULL AND t.kind = 'expense'
-          AND t.occurred_at >= current_date - interval '30 days'
+          AND t.occurred_at >= $2::date - interval '30 days'
+          AND t.occurred_at <= $2::date
         GROUP BY c.name
         ORDER BY total DESC
         LIMIT 3`,
-      [userId],
+      [userId, today],
     ),
     getInvestmentsSummary(userId),
   ]);

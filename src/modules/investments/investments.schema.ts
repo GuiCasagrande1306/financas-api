@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDay, nonNegativeCents } from '../../lib/zod';
 
 /**
  * Tipos de ativo suportados. São os tipos CONCRETOS (o instrumento). A classe
@@ -34,11 +35,11 @@ export const yieldType = z.enum(['pre', 'cdi', 'selic']);
 export const createInvestmentSchema = z.object({
   name: z.string().min(1).max(120),
   assetType: assetType.default('outros'),
-  investedAmount: z.number().int().nonnegative(), // CENTAVOS
-  currentAmount: z.number().int().nonnegative().optional(), // CENTAVOS; manual/fallback
+  investedAmount: nonNegativeCents, // CENTAVOS (teto R$ 10 bi)
+  currentAmount: nonNegativeCents.optional(), // CENTAVOS; manual/fallback
   expectedAnnualRate: z.number().min(0).max(9999.99).default(0), // pré: % a.a. | pós: % do indicador
   yieldType: yieldType.default('pre'),
-  purchaseDate: z.string().date().optional(), // 'YYYY-MM-DD' (default = hoje)
+  purchaseDate: isoDay.optional(), // 'YYYY-MM-DD' (default = hoje em America/Sao_Paulo)
   notes: z.string().max(1000).nullish(),
 });
 

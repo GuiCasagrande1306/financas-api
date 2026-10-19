@@ -353,6 +353,42 @@ create policy "own investments" on public.investments
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- ===========================================================================
+-- CONTAS, TRANSFERÊNCIAS E FATURAS (migração aditiva — idempotente)
+-- Saldo da conta = initial_balance + income − expense FORA do cartão
+--                  − transfer saindo (inclui pagamento de fatura) + transfer entrando.
+-- Compra no cartão continua com account_id = conta padrão (NOT NULL), mas não
+-- mexe no saldo: vira fatura, quitada depois por uma transfer com invoice_month.
+-- ===========================================================================
+-- accounts: updated_at + trigger (as outras tabelas já têm)
+alter table public.accounts add column if not exists updated_at timestamptz not null default now();
+drop trigger if exists trg_accounts_updated on public.accounts;
+create trigger trg_accounts_updated before update on public.accounts
+  for each row execute function public.set_updated_at();
+
+-- transactions: destino de transferência e mês da fatura paga
+alter table public.transactions
+  add column if not exists transfer_account_id uuid references public.accounts(id) on delete restrict;
+alter table public.transactions
+  add column if not exists invoice_month text;   -- 'YYYY-MM', só em pagamento de fatura
+
+create index if not exists idx_tx_user_account_date
+  on public.transactions(user_id, account_id, occurred_at desc) where deleted_at is null;
+create index if not exists idx_tx_user_card_date
+  on public.transactions(user_id, credit_card_id, occurred_at desc)
+  where deleted_at is null and credit_card_id is not null;
+create index if not exists idx_tx_transfer_account
+  on public.transactions(transfer_account_id) where transfer_account_id is not null;
+
+-- credit_cards: arquivar em vez de apagar (apagar com histórico corrompe o saldo)
+alter table public.credit_cards add column if not exists is_archived boolean not null default false;
+
+-- recurring_expenses: de onde sai a assinatura
+alter table public.recurring_expenses
+  add column if not exists account_id uuid references public.accounts(id) on delete set null;
+alter table public.recurring_expenses
+  add column if not exists credit_card_id uuid references public.credit_cards(id) on delete set null;
+
+-- ===========================================================================
 -- Cria o profile automaticamente quando um usuário se cadastra no Supabase Auth.
 -- ===========================================================================
 create or replace function public.handle_new_user()

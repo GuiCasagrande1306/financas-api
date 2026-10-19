@@ -13,6 +13,35 @@ relacional e já funciona.
 
 ---
 
+## 0. Ordem OBRIGATÓRIA de deploy — versão "Contas, transferências e faturas"
+
+Esta versão do backend precisa de colunas novas no banco (`transactions.transfer_account_id`,
+`transactions.invoice_month`, `accounts.updated_at`, `credit_cards.is_archived`,
+`recurring_expenses.account_id` e `recurring_expenses.credit_card_id`). Siga **nesta ordem**:
+
+1. **Migração no banco de PRODUÇÃO** — `node db/migrate.js` com o `DATABASE_URL` de produção.
+   Só com a **autorização explícita do dono do projeto**. A migração é aditiva e idempotente
+   (pode rodar 2x): só acrescenta colunas, índices e o trigger de `accounts.updated_at`.
+2. **Push do backend** (o Render faz o redeploy). Se o passo 1 não tiver rodado, a API nova
+   **se recusa a subir**: o `src/server.ts` confere as colunas antes do `listen`, escreve
+   "Rode db/migrate.js antes de subir esta versão" no log e sai com código 1 — o health
+   check falha e a versão antiga continua no ar.
+3. **Push do frontend** (Vercel). O app novo usa as rotas novas (`/accounts`,
+   `/reports/sources`, pagamento de fatura); com o backend antigo ele quebraria.
+
+> **Aviso para quem já usa o app: o saldo pode mudar depois do deploy.** A regra de saldo
+> agora é uma só (contas não arquivadas, até hoje em São Paulo):
+> - **estorno no cartão não soma mais no saldo** — ele abate a fatura, não entra na conta;
+> - **lançamento com data futura só conta no dia dele** (antes, despesa/receita agendada
+>   já mexia no saldo de hoje);
+> - compra no cartão continua fora do saldo: quem tira o dinheiro da conta é o pagamento da fatura.
+>
+> Para conferir: compare `summary.currentBalance` antes e depois do deploy. A diferença
+> (antes − depois) tem de ser exatamente: estornos no cartão + receitas com data futura −
+> despesas com data futura fora do cartão.
+
+---
+
 ## 1. Banco de dados (Supabase) — conectar via .env
 
 Nada muda no banco; só garanta que a API em produção recebe estas variáveis

@@ -1,15 +1,13 @@
 import { z } from 'zod';
+import { isoMonth, positiveCents } from '../../lib/zod';
 
 export const listBudgetsQuery = z.object({
-  month: z
-    .string()
-    .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Formato esperado: YYYY-MM')
-    .optional(),
+  month: isoMonth.optional(), // 'YYYY-MM'
 });
 
 export const upsertBudgetSchema = z.object({
   categoryId: z.string().uuid(),
-  amount: z.number().int().positive(), // teto em CENTAVOS
+  amount: positiveCents, // teto em CENTAVOS
 });
 
 export const idParam = z.object({ id: z.string().uuid() });

@@ -2,6 +2,7 @@ import { PluggyClient } from 'pluggy-sdk';
 import { env } from '../../env';
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
+import { getOrCreateDefaultAccount } from '../accounts/accounts.service';
 
 let client: PluggyClient | null = null;
 
@@ -27,21 +28,6 @@ function pluggy(): PluggyClient {
 export async function createConnectToken(): Promise<string> {
   const { accessToken } = await pluggy().createConnectToken();
   return accessToken;
-}
-
-/** Conta padrão (Carteira) do usuário — destino das transações importadas. */
-async function resolveDefaultAccount(userId: string): Promise<string> {
-  const existing = await query<{ id: string }>(
-    `SELECT id FROM accounts WHERE user_id = $1 AND is_archived = false ORDER BY created_at LIMIT 1`,
-    [userId],
-  );
-  if (existing.length) return existing[0].id;
-  const created = await query<{ id: string }>(
-    `INSERT INTO accounts (user_id, name, type, icon, color)
-       VALUES ($1, 'Carteira', 'cash', 'wallet', '#10b981') RETURNING id`,
-    [userId],
-  );
-  return created[0].id;
 }
 
 /** Palavra-chave da categoria da Pluggy → categoria do sistema mais próxima. */
@@ -89,7 +75,8 @@ export async function importItemTransactions(
   const p = pluggy();
   const accountsResp = await p.fetchAccounts(itemId);
   const accounts = accountsResp.results ?? [];
-  const localAccountId = await resolveDefaultAccount(userId);
+  // Destino das transações importadas: a conta padrão (função única do módulo de contas).
+  const localAccountId = await getOrCreateDefaultAccount(userId);
   let imported = 0;
 
   for (const acc of accounts) {

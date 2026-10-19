@@ -43,6 +43,15 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
       return res
         .status(400)
         .json({ error: { code: 'INVALID_INPUT', message: 'Formato de dado inválido' } });
+    case '22003': // numeric_value_out_of_range (ex: valor/soma estoura o BIGINT)
+      return res.status(400).json({
+        error: { code: 'OUT_OF_RANGE', message: 'Valor fora do intervalo permitido. Confira o valor digitado.' },
+      });
+    case '22007': // invalid_datetime_format
+    case '22008': // datetime_field_overflow (ex: ano 0, mês 13)
+      return res.status(400).json({
+        error: { code: 'INVALID_DATE', message: 'Data inválida ou fora do intervalo permitido (1900–2100).' },
+      });
   }
 
   // Fallback: erro não previsto — loga tudo no servidor, expõe pouco ao cliente.

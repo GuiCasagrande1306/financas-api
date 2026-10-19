@@ -3,15 +3,26 @@ import { asyncHandler } from '../../lib/asyncHandler';
 import { validate } from '../../middlewares/validate';
 import { requireUserId } from '../../middlewares/auth';
 import * as service from './credit-cards.service';
-import { createCardSchema, updateCardSchema, idParam, invoiceQuery } from './credit-cards.schema';
+import {
+  createCardSchema,
+  updateCardSchema,
+  idParam,
+  invoiceQuery,
+  listCardsQuery,
+  invoicePaymentParams,
+  payInvoiceSchema,
+  type ListCardsQuery,
+} from './credit-cards.schema';
 
 export const creditCardsRouter = Router();
 
-// GET /api/credit-cards — cartões com fatura atual e limite disponível
+// GET /api/credit-cards?includeArchived=true|false — cartões com fatura atual e limite disponível
 creditCardsRouter.get(
   '/',
+  validate({ query: listCardsQuery }),
   asyncHandler(async (req, res) => {
-    res.json({ data: await service.listCards(requireUserId(req)) });
+    const { includeArchived } = req.query as unknown as ListCardsQuery;
+    res.json({ data: await service.listCards(requireUserId(req), includeArchived) });
   }),
 );
 
@@ -21,6 +32,21 @@ creditCardsRouter.post(
   validate({ body: createCardSchema }),
   asyncHandler(async (req, res) => {
     res.status(201).json(await service.createCard(requireUserId(req), req.body));
+  }),
+);
+
+// POST /api/credit-cards/:id/invoices/:month/payments — paga a fatura do mês (YYYY-MM)
+creditCardsRouter.post(
+  '/:id/invoices/:month/payments',
+  validate({ params: invoicePaymentParams, body: payInvoiceSchema }),
+  asyncHandler(async (req, res) => {
+    const tx = await service.createInvoicePayment(
+      requireUserId(req),
+      req.params.id,
+      req.params.month,
+      req.body,
+    );
+    res.status(201).json(tx);
   }),
 );
 
@@ -52,7 +78,7 @@ creditCardsRouter.get(
   }),
 );
 
-// PATCH /api/credit-cards/:id
+// PATCH /api/credit-cards/:id — edita (inclui arquivar via isArchived)
 creditCardsRouter.patch(
   '/:id',
   validate({ params: idParam, body: updateCardSchema }),
@@ -61,7 +87,7 @@ creditCardsRouter.patch(
   }),
 );
 
-// DELETE /api/credit-cards/:id
+// DELETE /api/credit-cards/:id — só sem lançamentos (senão 409: arquive)
 creditCardsRouter.delete(
   '/:id',
   validate({ params: idParam }),

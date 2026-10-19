@@ -1,5 +1,6 @@
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
+import { diffDaysISO, todaySP } from '../../lib/dates';
 import { getIndicatorRates } from '../indicators/indicators.service';
 import type {
   AssetType,
@@ -35,7 +36,6 @@ const CLASS_LABEL: Record<AssetClass, string> = {
 };
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
-const todayISO = () => new Date().toISOString().slice(0, 10);
 
 // ---------------------------------------------------------------------------
 // Cálculo do VALOR ATUAL (Fase 8)
@@ -69,10 +69,9 @@ function effectiveAnnualRate(r: RawInvestment, rates: Rates): number {
   return r.expectedAnnualRate; // pré-fixado
 }
 
-/** Dias corridos desde a data de compra (base simples para o MVP). */
+/** Dias corridos desde a data de compra até hoje em America/Sao_Paulo (base simples para o MVP). */
 function daysSince(dateStr: string): number {
-  const start = new Date(`${dateStr}T00:00:00Z`).getTime();
-  return Math.max(0, Math.floor((Date.now() - start) / 86_400_000));
+  return Math.max(0, diffDaysISO(dateStr, todaySP()));
 }
 
 /**
@@ -125,7 +124,7 @@ const RAW_COLUMNS = `
 
 export async function createInvestment(userId: string, input: CreateInvestmentInput) {
   const current = input.currentAmount ?? input.investedAmount;
-  const purchaseDate = input.purchaseDate ?? todayISO();
+  const purchaseDate = input.purchaseDate ?? todaySP(); // hoje em America/Sao_Paulo
 
   const rows = await query<RawInvestment>(
     `INSERT INTO investments

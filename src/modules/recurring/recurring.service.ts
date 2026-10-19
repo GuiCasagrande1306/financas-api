@@ -1,18 +1,23 @@
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
+import { clampDay, isoDate, todaySP } from '../../lib/dates';
+import { assertAccountUsable, getOrCreateDefaultAccount } from '../accounts/accounts.service';
+import { findCard } from '../credit-cards/credit-cards.service';
 import type { CreateRecurringInput, UpdateRecurringInput } from './recurring.schema';
 
 const COLS = `
   id,
   name,
   amount,
-  due_day     AS "dueDay",
-  category_id AS "categoryId",
+  due_day        AS "dueDay",
+  category_id    AS "categoryId",
+  account_id     AS "accountId",
+  credit_card_id AS "creditCardId",
   color,
   icon,
-  is_active   AS "isActive",
-  created_at  AS "createdAt",
-  updated_at  AS "updatedAt"
+  is_active      AS "isActive",
+  created_at     AS "createdAt",
+  updated_at     AS "updatedAt"
 `;
 
 interface RecurringRow {
@@ -21,6 +26,8 @@ interface RecurringRow {
   amount: number;
   dueDay: number;
   categoryId: string | null;
+  accountId: string | null;
+  creditCardId: string | null;
   color: string;
   icon: string | null;
   isActive: boolean;
@@ -28,14 +35,11 @@ interface RecurringRow {
   updatedAt: string;
 }
 
+/** Hoje (America/Sao_Paulo) quebrado em partes. m: 0–11. */
 function todayParts() {
-  const d = new Date();
-  return { y: d.getFullYear(), m: d.getMonth(), day: d.getDate() }; // m: 0–11
+  const [y, m1, day] = todaySP().split('-').map(Number);
+  return { y, m: m1 - 1, day };
 }
-/** Último dia válido do mês (trata Fev, meses de 30/31 dias). */
-const clampDay = (y: number, m: number, day: number) => Math.min(day, new Date(y, m + 1, 0).getDate());
-const iso = (y: number, m: number, day: number) =>
-  `${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
 /** Próximo vencimento a partir de hoje: data 'YYYY-MM-DD' + dias que faltam. */
 function nextDue(dueDay: number): { date: string; daysUntil: number } {
@@ -51,64 +55,81 @@ function nextDue(dueDay: number): { date: string; daysUntil: number } {
     }
     dd = clampDay(ny, nm, dueDay);
   }
-  const daysUntil = Math.round(
-    (new Date(ny, nm, dd).getTime() - new Date(y, m, day).getTime()) / 86_400_000,
-  );
-  return { date: iso(ny, nm, dd), daysUntil };
-}
-
-/** Conta em dinheiro padrão do usuário (cria a "Carteira" se ainda não existir). */
-async function resolveCashAccount(userId: string): Promise<string> {
-  const existing = await query<{ id: string }>(
-    `SELECT id FROM accounts
-       WHERE user_id = $1 AND type = 'cash' AND is_archived = false
-       ORDER BY created_at LIMIT 1`,
-    [userId],
-  );
-  if (existing.length) return existing[0].id;
-  const created = await query<{ id: string }>(
-    `INSERT INTO accounts (user_id, name, type, icon, color)
-       VALUES ($1, 'Carteira', 'cash', 'wallet', '#10b981')
-       RETURNING id`,
-    [userId],
-  );
-  return created[0].id;
+  const daysUntil = Math.round((Date.UTC(ny, nm, dd) - Date.UTC(y, m, day)) / 86_400_000);
+  return { date: isoDate(ny, nm, dd), daysUntil };
 }
 
 /**
  * "O app lança sozinho todo mês": posta um gasto para cada recorrência ATIVA
  * cujo vencimento já chegou neste mês e que ainda não foi lançada no mês.
  * Roda de forma preguiçosa (ao abrir o módulo) — confiável mesmo com o free
- * tier do Render hibernando. Idempotente via `last_posted`.
+ * tier do Render hibernando.
+ *
+ * Origem: com cartão → despesa no cartão (account_id = conta padrão); senão a
+ * conta da recorrência (se ainda ativa) ou a conta padrão.
+ *
+ * Anti-lançamento em dobro: cada recorrência primeiro "reivindica" o mês
+ * (UPDATE de last_posted só se ainda não foi lançada no mês) e a transação só é
+ * inserida se a reivindicação voltou — tudo numa única instrução. Duas
+ * requisições simultâneas: a segunda espera a trava da linha, vê last_posted já
+ * neste mês e não insere nada.
  */
 export async function postDueRecurring(userId: string): Promise<number> {
-  const due = await query<{ id: string; name: string; amount: number; dueDay: number; categoryId: string | null }>(
-    `SELECT id, name, amount, due_day AS "dueDay", category_id AS "categoryId"
-       FROM recurring_expenses
-      WHERE user_id = $1 AND is_active = true
-        AND (last_posted IS NULL OR last_posted < date_trunc('month', current_date))`,
-    [userId],
+  const today = todaySP();
+  const monthStart = `${today.slice(0, 7)}-01`;
+
+  const due = await query<{
+    id: string;
+    name: string;
+    amount: number;
+    dueDay: number;
+    categoryId: string | null;
+    accountId: string | null;
+    creditCardId: string | null;
+  }>(
+    `SELECT r.id, r.name, r.amount, r.due_day AS "dueDay", r.category_id AS "categoryId",
+            a.id AS "accountId", c.id AS "creditCardId"
+       FROM recurring_expenses r
+       LEFT JOIN accounts a
+         ON a.id = r.account_id AND a.user_id = r.user_id AND a.is_archived = false
+       LEFT JOIN credit_cards c
+         ON c.id = r.credit_card_id AND c.user_id = r.user_id
+      WHERE r.user_id = $1 AND r.is_active = true
+        AND (r.last_posted IS NULL OR r.last_posted < $2::date)`,
+    [userId, monthStart],
   );
   if (due.length === 0) return 0;
 
   const { y, m, day } = todayParts();
+  let defaultAccountId: string | null = null;
   let posted = 0;
   for (const r of due) {
     const dueDate = clampDay(y, m, r.dueDay);
     if (day < dueDate) continue; // ainda não venceu neste mês
-    const occurredAt = iso(y, m, dueDate);
-    const accountId = await resolveCashAccount(userId);
-    await query(
-      `INSERT INTO transactions
-         (user_id, account_id, category_id, amount, kind, description, occurred_at)
-       VALUES ($1, $2, $3, $4, 'expense', $5, $6::date)`,
-      [userId, accountId, r.categoryId, r.amount, r.name, occurredAt],
+    const occurredAt = isoDate(y, m, dueDate);
+
+    let accountId = r.creditCardId ? null : r.accountId;
+    if (!accountId) {
+      defaultAccountId ??= await getOrCreateDefaultAccount(userId);
+      accountId = defaultAccountId;
+    }
+
+    const inserted = await query<{ id: string }>(
+      `WITH claimed AS (
+         UPDATE recurring_expenses
+            SET last_posted = $3::date, updated_at = now()
+          WHERE id = $1 AND user_id = $2 AND is_active = true
+            AND (last_posted IS NULL OR last_posted < $4::date)
+          RETURNING id
+       )
+       INSERT INTO transactions
+         (user_id, account_id, category_id, amount, kind, description, occurred_at, credit_card_id)
+       SELECT $2::uuid, $5::uuid, $6::uuid, $7::bigint, 'expense', $8::text, $3::date, $9::uuid
+         FROM claimed
+       RETURNING id`,
+      [r.id, userId, occurredAt, monthStart, accountId, r.categoryId, r.amount, r.name, r.creditCardId],
     );
-    await query(
-      `UPDATE recurring_expenses SET last_posted = $1::date, updated_at = now() WHERE id = $2`,
-      [occurredAt, r.id],
-    );
-    posted += 1;
+    if (inserted.length > 0) posted += 1;
   }
   return posted;
 }
@@ -146,19 +167,49 @@ export async function listRecurring(userId: string) {
   };
 }
 
-export async function createRecurring(userId: string, input: CreateRecurringInput) {
-  if (input.categoryId) {
-    const cat = await query('SELECT id FROM categories WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)', [
-      input.categoryId,
-      userId,
-    ]);
-    if (cat.length === 0) throw AppError.badRequest('Categoria inválida');
+async function assertCategory(userId: string, categoryId: string): Promise<void> {
+  const cat = await query('SELECT id FROM categories WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)', [
+    categoryId,
+    userId,
+  ]);
+  if (cat.length === 0) throw AppError.badRequest('Categoria inválida');
+}
+
+/**
+ * Confere a origem escolhida (posse; conta não arquivada). Conta e cartão
+ * juntos → 400: a assinatura sai de um OU de outro.
+ */
+async function assertSource(userId: string, accountId?: string | null, creditCardId?: string | null) {
+  if (accountId && creditCardId) {
+    throw AppError.badRequest('Escolha uma conta OU um cartão para pagar, não os dois.');
   }
+  if (accountId) await assertAccountUsable(userId, accountId);
+  if (creditCardId && !(await findCard(userId, creditCardId))) {
+    throw AppError.badRequest('Cartão não encontrado');
+  }
+}
+
+export async function createRecurring(userId: string, input: CreateRecurringInput) {
+  await Promise.all([
+    input.categoryId ? assertCategory(userId, input.categoryId) : null,
+    assertSource(userId, input.accountId, input.creditCardId),
+  ]);
   const rows = await query<RecurringRow>(
-    `INSERT INTO recurring_expenses (user_id, name, amount, due_day, category_id, color, icon)
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6, '#6366f1'), $7)
+    `INSERT INTO recurring_expenses
+       (user_id, name, amount, due_day, category_id, color, icon, account_id, credit_card_id)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6, '#6366f1'), $7, $8, $9)
        RETURNING ${COLS}`,
-    [userId, input.name, input.amount, input.dueDay, input.categoryId ?? null, input.color ?? null, input.icon ?? null],
+    [
+      userId,
+      input.name,
+      input.amount,
+      input.dueDay,
+      input.categoryId ?? null,
+      input.color ?? null,
+      input.icon ?? null,
+      input.accountId ?? null,
+      input.creditCardId ?? null,
+    ],
   );
   return rows[0];
 }
@@ -173,6 +224,11 @@ async function getRecurring(userId: string, id: string): Promise<RecurringRow> {
 }
 
 export async function updateRecurring(userId: string, id: string, input: UpdateRecurringInput) {
+  await Promise.all([
+    input.categoryId ? assertCategory(userId, input.categoryId) : null,
+    assertSource(userId, input.accountId, input.creditCardId),
+  ]);
+
   const fields: Record<string, unknown> = {};
   if (input.name !== undefined) fields.name = input.name;
   if (input.amount !== undefined) fields.amount = input.amount;
@@ -181,6 +237,15 @@ export async function updateRecurring(userId: string, id: string, input: UpdateR
   if (input.color !== undefined) fields.color = input.color;
   if (input.icon !== undefined) fields.icon = input.icon;
   if (input.isActive !== undefined) fields.is_active = input.isActive;
+  // Origem: escolher uma conta tira o cartão (e vice-versa), mesmo que o patch não diga.
+  if (input.accountId !== undefined) {
+    fields.account_id = input.accountId ?? null;
+    if (input.accountId && input.creditCardId === undefined) fields.credit_card_id = null;
+  }
+  if (input.creditCardId !== undefined) {
+    fields.credit_card_id = input.creditCardId ?? null;
+    if (input.creditCardId && input.accountId === undefined) fields.account_id = null;
+  }
 
   const keys = Object.keys(fields);
   if (keys.length === 0) return getRecurring(userId, id);

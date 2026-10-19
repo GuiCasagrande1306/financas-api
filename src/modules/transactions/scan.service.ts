@@ -1,13 +1,9 @@
 import { env } from '../../env';
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
+import { currentYearSP, todaySP } from '../../lib/dates';
 
 const GEMINI_MODEL = env.GEMINI_MODEL || 'gemini-flash-latest';
-
-function todayISO(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
 
 /**
  * Lê a foto de um recibo/nota fiscal e extrai os dados do gasto usando a visão
@@ -56,7 +52,7 @@ export async function scanReceipt(userId: string, buffer: Buffer, mimetype: stri
           {
             text:
               'Extraia os dados deste recibo/nota fiscal brasileiro. ' +
-              `Se o ano não estiver visível na data, assuma ${new Date().getFullYear()}. ` +
+              `Se o ano não estiver visível na data, assuma ${currentYearSP()}. ` +
               'Se a imagem estiver borrada, ilegível ou não for um recibo, defina readable=false.',
           },
         ],
@@ -117,7 +113,7 @@ export async function scanReceipt(userId: string, buffer: Buffer, mimetype: stri
     throw new AppError(422, 'Não consegui identificar o valor total no recibo.', 'UNREADABLE_RECEIPT');
   }
 
-  const date = parsed.date && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date) ? parsed.date : todayISO();
+  const date = parsed.date && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date) ? parsed.date : todaySP();
 
   return {
     title: parsed.title ?? 'Recibo',

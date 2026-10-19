@@ -16,6 +16,7 @@ import { recurringRouter } from './modules/recurring/recurring.routes';
 import { forecastRouter } from './modules/forecast/forecast.routes';
 import { achievementsRouter } from './modules/achievements/achievements.routes';
 import { goalsRouter } from './modules/goals/goals.routes';
+import { accountsRouter } from './modules/accounts/accounts.routes';
 
 export const routes = Router();
 
@@ -30,6 +31,7 @@ routes.use('/open-finance/webhook', openFinanceWebhookRouter);
 // Daqui pra baixo, toda rota exige um usuário autenticado.
 routes.use(authenticate);
 
+routes.use('/accounts', accountsRouter);
 routes.use('/transactions', transactionsRouter);
 routes.use('/categories', categoriesRouter);
 routes.use('/summary', summaryRouter);

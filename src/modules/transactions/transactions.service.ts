@@ -1,66 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
-import type {
-  CreateTransactionInput,
-  ListTransactionsQuery,
-  UpdateTransactionInput,
+import { addMonthsISO, addMonthsYM, todaySP } from '../../lib/dates';
+import { assertAccountUsable, getOrCreateDefaultAccount } from '../accounts/accounts.service';
+import { cycleForMonth, findCard, invoiceMonthOf } from '../credit-cards/credit-cards.service';
+import {
+  TX_COLUMNS,
+  type CreateTransactionInput,
+  type ListTransactionsQuery,
+  type TransactionRow,
+  type UpdateTransactionInput,
 } from './transactions.schema';
 
-/**
- * Lista de colunas devolvida ao cliente, já convertida de snake_case (banco)
- * para camelCase (API). Reaproveitada em todos os RETURNING/SELECT.
- */
-const TX_COLUMNS = `
-  id,
-  account_id          AS "accountId",
-  category_id         AS "categoryId",
-  amount,
-  kind,
-  description,
-  merchant,
-  occurred_at         AS "occurredAt",
-  receipt_url         AS "receiptUrl",
-  is_auto_categorized AS "isAutoCategorized",
-  notes,
-  credit_card_id      AS "creditCardId",
-  installments,
-  installment_group_id AS "installmentGroupId",
-  created_at          AS "createdAt",
-  updated_at          AS "updatedAt"
-`;
-
-/**
- * Resolve a conta da transação. Se o cliente não informar `accountId`, pega
- * (ou cria) a carteira em dinheiro padrão do usuário — mantém o registro sem
- * fricção, fiel à proposta do produto.
- */
-async function resolveAccountId(userId: string, accountId?: string | null): Promise<string> {
-  if (accountId) {
-    const rows = await query('SELECT id FROM accounts WHERE id = $1 AND user_id = $2', [
-      accountId,
-      userId,
-    ]);
-    if (rows.length === 0) throw AppError.badRequest('Conta não encontrada');
-    return accountId;
-  }
-
-  const existing = await query<{ id: string }>(
-    `SELECT id FROM accounts
-       WHERE user_id = $1 AND type = 'cash' AND is_archived = false
-       ORDER BY created_at LIMIT 1`,
-    [userId],
-  );
-  if (existing.length) return existing[0].id;
-
-  const created = await query<{ id: string }>(
-    `INSERT INTO accounts (user_id, name, type, icon, color)
-       VALUES ($1, 'Carteira', 'cash', 'wallet', '#10b981')
-       RETURNING id`,
-    [userId],
-  );
-  return created[0].id;
-}
+type TxKind = TransactionRow['kind'];
 
 /** Garante que a categoria (se informada) pertence ao usuário ou é do sistema. */
 async function assertCategoryValid(userId: string, categoryId?: string | null): Promise<void> {
@@ -72,54 +24,135 @@ async function assertCategoryValid(userId: string, categoryId?: string | null): 
   if (rows.length === 0) throw AppError.badRequest('Categoria inválida');
 }
 
-/** Data de hoje ('YYYY-MM-DD'), no fuso do servidor (espelha o current_date do banco). */
-function todayISO(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/** Cartão (vindo do cliente) tem de ser do usuário. Devolve o dia de fechamento. */
+async function assertCardOwned(userId: string, cardId: string): Promise<{ closingDay: number }> {
+  const card = await findCard(userId, cardId);
+  if (!card) throw AppError.badRequest('Cartão não encontrado');
+  return { closingDay: card.closingDay };
+}
+
+interface SourceInput {
+  kind: TxKind;
+  accountId: string | null;
+  transferAccountId: string | null;
+  creditCardId: string | null;
+}
+
+/** Quais ids são escolhas NOVAS (só elas são conferidas e não podem estar arquivadas). */
+interface SourceChecks {
+  account: boolean;
+  transferAccount: boolean;
+  card: boolean;
+}
+
+interface ResolvedSource {
+  accountId: string;
+  transferAccountId: string | null;
+  creditCardId: string | null;
+  closingDay: number | null; // fechamento do cartão, se a compra é no crédito e o cartão foi conferido
 }
 
 /**
- * Soma `add` meses a uma data 'YYYY-MM-DD' com CLAMP no fim do mês.
- * Ex.: 31/01 + 1 mês => 28/02 (nunca "vaza" para 03/03 como o Date puro faria).
+ * Valida "de onde saiu / para onde foi" o dinheiro (spec §4.3) e devolve a
+ * origem pronta para gravar:
+ *  - transfer: exige conta de origem e de destino, diferentes, do usuário e não
+ *    arquivadas; cartão não pode (pagamento de fatura tem rota própria);
+ *  - expense/income: sem conta de destino; conta opcional (sem ela → conta
+ *    padrão; com ela → do usuário e não arquivada); cartão, se vier, do usuário.
+ * Ids que não mudaram numa edição não são reconferidos (linha antiga pode
+ * manter a conta arquivada).
  */
-function addMonthsISO(iso: string, add: number): string {
-  const [y, m, d] = iso.split('-').map(Number);
-  const idx = m - 1 + add;
-  const year = y + Math.floor(idx / 12);
-  const month = ((idx % 12) + 12) % 12; // 0–11
-  const lastDay = new Date(year, month + 1, 0).getDate();
-  const day = Math.min(d, lastDay);
-  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+async function resolveSource(userId: string, src: SourceInput, checks: SourceChecks): Promise<ResolvedSource> {
+  if (src.kind === 'transfer') {
+    if (src.creditCardId) {
+      throw AppError.badRequest('Para pagar fatura use o botão Pagar fatura do cartão.');
+    }
+    if (!src.accountId || !src.transferAccountId) {
+      throw AppError.badRequest('Transferência precisa da conta de origem e da conta de destino.');
+    }
+    if (src.accountId === src.transferAccountId) {
+      throw AppError.badRequest('A conta de origem e a de destino precisam ser diferentes.');
+    }
+    await Promise.all([
+      checks.account ? assertAccountUsable(userId, src.accountId, { label: 'de origem' }) : null,
+      checks.transferAccount
+        ? assertAccountUsable(userId, src.transferAccountId, { label: 'de destino' })
+        : null,
+    ]);
+    return {
+      accountId: src.accountId,
+      transferAccountId: src.transferAccountId,
+      creditCardId: null,
+      closingDay: null,
+    };
+  }
+
+  if (src.transferAccountId) {
+    throw AppError.badRequest('Só transferência tem conta de destino.');
+  }
+
+  const [accountId, card] = await Promise.all([
+    src.accountId
+      ? checks.account
+        ? assertAccountUsable(userId, src.accountId).then((a) => a.id)
+        : Promise.resolve(src.accountId)
+      : getOrCreateDefaultAccount(userId),
+    src.creditCardId && checks.card ? assertCardOwned(userId, src.creditCardId) : null,
+  ]);
+  return {
+    accountId,
+    transferAccountId: null,
+    creditCardId: src.creditCardId,
+    closingDay: card?.closingDay ?? null,
+  };
 }
 
 export async function createTransaction(userId: string, input: CreateTransactionInput) {
-  const accountId = await resolveAccountId(userId, input.accountId);
-  await assertCategoryValid(userId, input.categoryId);
-
   const kind = input.kind ?? 'expense';
   const parcels = input.installments ?? 1;
-  const baseDate = input.occurredAt ?? todayISO();
+  if (kind === 'transfer' && parcels > 1) {
+    throw AppError.badRequest('Transferência não pode ser parcelada.');
+  }
+
+  const [source] = await Promise.all([
+    resolveSource(
+      userId,
+      {
+        kind,
+        accountId: input.accountId ?? null,
+        transferAccountId: input.transferAccountId ?? null,
+        creditCardId: input.creditCardId ?? null,
+      },
+      { account: true, transferAccount: true, card: true },
+    ),
+    kind === 'transfer' ? null : assertCategoryValid(userId, input.categoryId),
+  ]);
+
+  // Transferência não é gasto nem receita → nunca tem categoria.
+  const categoryId = kind === 'transfer' ? null : input.categoryId ?? null;
+  const baseDate = input.occurredAt ?? todaySP();
   const baseDesc = (input.description ?? '').trim();
 
   // À vista (1x): uma única transação, como sempre.
   if (parcels <= 1) {
     const rows = await query(
       `INSERT INTO transactions
-         (user_id, account_id, category_id, amount, kind, description, merchant,
-          occurred_at, notes, credit_card_id, installments)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11)
+         (user_id, account_id, transfer_account_id, category_id, amount, kind, description,
+          merchant, occurred_at, notes, credit_card_id, installments)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12)
        RETURNING ${TX_COLUMNS}`,
       [
         userId,
-        accountId,
-        input.categoryId ?? null,
+        source.accountId,
+        source.transferAccountId,
+        categoryId,
         input.amount,
         kind,
         input.description ?? null,
         input.merchant ?? null,
         baseDate,
         input.notes ?? null,
-        input.creditCardId ?? null,
+        source.creditCardId,
         null,
       ],
     );
@@ -133,11 +166,24 @@ export async function createTransaction(userId: string, input: CreateTransaction
   // Mesmo id em TODAS as parcelas desta compra → permite apagá-las em massa depois.
   const groupId = randomUUID();
 
+  // No cartão, cada parcela tem de cair numa fatura diferente: a parcela i vai na
+  // fatura da compra + (i−1) meses. Com compra no dia 29–31 e fechamento ≥ 28, a
+  // data "compra + (i−1) meses" (com clamp) pode cair ANTES do ciclo da fatura-alvo
+  // (duas parcelas na mesma fatura e um mês vazio) — aí a parcela vai para o
+  // primeiro dia do ciclo da fatura-alvo.
+  const closingDay = source.closingDay;
+  const firstInvoice = closingDay !== null ? invoiceMonthOf(closingDay, baseDate) : null;
+
   const tuples: string[] = [];
   const params: unknown[] = [];
   for (let i = 1; i <= parcels; i++) {
     const amount = i === 1 ? base + remainder : base;
-    const occurredAt = addMonthsISO(baseDate, i - 1); // parcela 1 = mês base, 2 = +1 mês…
+    let occurredAt = addMonthsISO(baseDate, i - 1); // parcela 1 = mês base, 2 = +1 mês…
+    if (closingDay !== null && firstInvoice) {
+      const [ty, tm] = addMonthsYM(firstInvoice, i - 1).split('-').map(Number);
+      const cycle = cycleForMonth(closingDay, ty, tm - 1);
+      if (occurredAt < cycle.start || occurredAt > cycle.end) occurredAt = cycle.start;
+    }
     const label = `${i}/${parcels}`;
     const description = baseDesc ? `${baseDesc} (${label})` : `Parcela ${label}`;
 
@@ -147,15 +193,15 @@ export async function createTransaction(userId: string, input: CreateTransaction
     );
     params.push(
       userId,
-      accountId,
-      input.categoryId ?? null,
+      source.accountId,
+      categoryId,
       amount,
       kind,
       description,
       input.merchant ?? null,
       occurredAt,
       input.notes ?? null,
-      input.creditCardId ?? null,
+      source.creditCardId,
       label,
       groupId,
     );
@@ -173,30 +219,64 @@ export async function createTransaction(userId: string, input: CreateTransaction
   return rows[0]; // a resposta 201 devolve a 1ª parcela
 }
 
+/** Filtro de conta/cartão vindo do cliente: confere a posse antes de usar. */
+async function assertFilterOwnership(userId: string, filters: ListTransactionsQuery): Promise<void> {
+  await Promise.all([
+    filters.accountId
+      ? query('SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2', [filters.accountId, userId]).then(
+          (rows) => {
+            if (rows.length === 0) throw AppError.notFound('Conta não encontrada');
+          },
+        )
+      : null,
+    filters.creditCardId
+      ? findCard(userId, filters.creditCardId).then((card) => {
+          if (!card) throw AppError.notFound('Cartão não encontrado');
+        })
+      : null,
+  ]);
+}
+
 export async function listTransactions(userId: string, filters: ListTransactionsQuery) {
-  const where: string[] = ['user_id = $1', 'deleted_at IS NULL'];
+  await assertFilterOwnership(userId, filters);
+
+  const where: string[] = ['t.user_id = $1', 't.deleted_at IS NULL'];
   const params: unknown[] = [userId];
 
   if (filters.kind) {
     params.push(filters.kind);
-    where.push(`kind = $${params.length}`);
+    where.push(`t.kind = $${params.length}`);
   }
   if (filters.categoryId) {
     params.push(filters.categoryId);
-    where.push(`category_id = $${params.length}`);
+    where.push(`t.category_id = $${params.length}`);
+  }
+  if (filters.accountId) {
+    // Linhas que MOVEM a conta — nunca só account_id = X: compra no cartão também
+    // guarda account_id (conta padrão) e não sai da conta.
+    params.push(filters.accountId);
+    const p = `$${params.length}`;
+    where.push(
+      `((t.account_id = ${p} AND (t.credit_card_id IS NULL OR t.kind = 'transfer')) OR t.transfer_account_id = ${p})`,
+    );
+  }
+  if (filters.creditCardId) {
+    // Compras/estornos do cartão + pagamentos da fatura.
+    params.push(filters.creditCardId);
+    where.push(`t.credit_card_id = $${params.length}`);
   }
   if (filters.search) {
     // Busca parcial case-insensitive no nome (descrição) e no estabelecimento.
     params.push(`%${filters.search}%`);
-    where.push(`(description ILIKE $${params.length} OR merchant ILIKE $${params.length})`);
+    where.push(`(t.description ILIKE $${params.length} OR t.merchant ILIKE $${params.length})`);
   }
   if (filters.from) {
     params.push(filters.from);
-    where.push(`occurred_at >= $${params.length}::date`);
+    where.push(`t.occurred_at >= $${params.length}::date`);
   }
   if (filters.to) {
     params.push(filters.to);
-    where.push(`occurred_at <= $${params.length}::date`);
+    where.push(`t.occurred_at <= $${params.length}::date`);
   }
 
   const whereSql = where.join(' AND ');
@@ -209,15 +289,15 @@ export async function listTransactions(userId: string, filters: ListTransactions
 
   const data = await query(
     `SELECT ${TX_COLUMNS}
-       FROM transactions
+       FROM transactions t
       WHERE ${whereSql}
-      ORDER BY occurred_at DESC, created_at DESC
+      ORDER BY t.occurred_at DESC, t.created_at DESC
       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     params,
   );
 
   const totalRows = await query<{ count: number }>(
-    `SELECT COUNT(*)::int AS count FROM transactions WHERE ${whereSql}`,
+    `SELECT COUNT(*)::int AS count FROM transactions t WHERE ${whereSql}`,
     whereParams,
   );
 
@@ -241,27 +321,8 @@ export async function getTransaction(userId: string, id: string) {
   return rows[0];
 }
 
-export async function updateTransaction(
-  userId: string,
-  id: string,
-  input: UpdateTransactionInput,
-) {
-  if (input.accountId) await resolveAccountId(userId, input.accountId);
-  if (input.categoryId !== undefined) await assertCategoryValid(userId, input.categoryId);
-
-  // Monta o SET dinamicamente só com os campos enviados.
-  const fields: Record<string, unknown> = {};
-  if (input.amount !== undefined) fields.amount = input.amount;
-  if (input.kind !== undefined) fields.kind = input.kind;
-  if (input.categoryId !== undefined) fields.category_id = input.categoryId;
-  if (input.accountId) fields.account_id = input.accountId; // conta nunca é "limpada"
-  if (input.description !== undefined) fields.description = input.description;
-  if (input.merchant !== undefined) fields.merchant = input.merchant;
-  if (input.occurredAt !== undefined) fields.occurred_at = input.occurredAt;
-  if (input.notes !== undefined) fields.notes = input.notes;
-  if (input.creditCardId !== undefined) fields.credit_card_id = input.creditCardId;
-  // `installments` não é editável: o rótulo da parcela ("2/4") é definido na criação.
-
+/** Aplica o SET dinâmico (só os campos em `fields`) e devolve a transação atualizada. */
+async function applyUpdate(userId: string, id: string, fields: Record<string, unknown>) {
   const keys = Object.keys(fields);
   if (keys.length === 0) return getTransaction(userId, id);
 
@@ -282,9 +343,108 @@ export async function updateTransaction(
 }
 
 /**
+ * Edita uma transação. Carrega a linha atual, mescla com o patch e valida o
+ * RESULTADO com as mesmas regras da criação (origem, posse, transferência).
+ * Pagamento de fatura (invoice_month) só aceita valor, data, conta e descrição.
+ * Trocar o tipo limpa o que não existe no tipo novo, se o patch não disser nada
+ * (ex.: virar transferência tira o cartão e a categoria).
+ */
+export async function updateTransaction(
+  userId: string,
+  id: string,
+  input: UpdateTransactionInput,
+) {
+  const found = await query<
+    Pick<
+      TransactionRow,
+      'kind' | 'accountId' | 'transferAccountId' | 'creditCardId' | 'categoryId' | 'installments' | 'invoiceMonth'
+    >
+  >(
+    `SELECT kind, account_id AS "accountId", transfer_account_id AS "transferAccountId",
+            credit_card_id AS "creditCardId", category_id AS "categoryId",
+            installments, invoice_month AS "invoiceMonth"
+       FROM transactions
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+    [id, userId],
+  );
+  if (found.length === 0) throw AppError.notFound('Transação não encontrada');
+  const cur = found[0];
+
+  const fields: Record<string, unknown> = {};
+
+  // ---- Pagamento de fatura: só valor, data, conta e descrição podem mudar. ----
+  if (cur.invoiceMonth) {
+    const changes = (v: string | null | undefined, now: string | null) => v !== undefined && (v ?? null) !== now;
+    if (
+      (input.kind !== undefined && input.kind !== cur.kind) ||
+      changes(input.creditCardId, cur.creditCardId) ||
+      changes(input.transferAccountId, cur.transferAccountId)
+    ) {
+      throw AppError.badRequest(
+        'Pagamento de fatura: só dá para mudar valor, data, conta e descrição. Para mudar o resto, desfaça o pagamento.',
+      );
+    }
+    if (input.accountId && input.accountId !== cur.accountId) {
+      await assertAccountUsable(userId, input.accountId);
+      fields.account_id = input.accountId;
+    }
+    if (input.amount !== undefined) fields.amount = input.amount;
+    if (input.occurredAt !== undefined) fields.occurred_at = input.occurredAt;
+    if (input.description !== undefined) fields.description = input.description;
+    return applyUpdate(userId, id, fields);
+  }
+
+  // ---- Demais linhas: mescla e valida o resultado. ----
+  const kind: TxKind = input.kind ?? cur.kind;
+  const kindChanged = kind !== cur.kind;
+  if (kind === 'transfer' && cur.installments) {
+    throw AppError.badRequest('Uma parcela não pode virar transferência.');
+  }
+
+  const accountId = input.accountId ? input.accountId : cur.accountId; // conta nunca é "limpada"
+  let transferAccountId =
+    input.transferAccountId !== undefined ? input.transferAccountId ?? null : cur.transferAccountId;
+  let creditCardId = input.creditCardId !== undefined ? input.creditCardId ?? null : cur.creditCardId;
+  if (kindChanged && kind !== 'transfer' && input.transferAccountId === undefined) transferAccountId = null;
+  if (kindChanged && kind === 'transfer' && input.creditCardId === undefined) creditCardId = null;
+
+  const [source] = await Promise.all([
+    resolveSource(
+      userId,
+      { kind, accountId, transferAccountId, creditCardId },
+      {
+        account: accountId !== cur.accountId,
+        transferAccount: transferAccountId !== cur.transferAccountId,
+        card: creditCardId !== cur.creditCardId,
+      },
+    ),
+    kind !== 'transfer' && input.categoryId !== undefined ? assertCategoryValid(userId, input.categoryId) : null,
+  ]);
+
+  if (input.kind !== undefined) fields.kind = kind;
+  if (source.accountId !== cur.accountId) fields.account_id = source.accountId;
+  if (source.transferAccountId !== cur.transferAccountId) fields.transfer_account_id = source.transferAccountId;
+  if (source.creditCardId !== cur.creditCardId) fields.credit_card_id = source.creditCardId;
+  if (kind === 'transfer') {
+    if (cur.categoryId !== null) fields.category_id = null; // transferência nunca tem categoria
+  } else if (input.categoryId !== undefined) {
+    fields.category_id = input.categoryId;
+  }
+  if (input.amount !== undefined) fields.amount = input.amount;
+  if (input.description !== undefined) fields.description = input.description;
+  if (input.merchant !== undefined) fields.merchant = input.merchant;
+  if (input.occurredAt !== undefined) fields.occurred_at = input.occurredAt;
+  if (input.notes !== undefined) fields.notes = input.notes;
+  // `installments` não é editável: o rótulo da parcela ("2/4") é definido na criação.
+
+  return applyUpdate(userId, id, fields);
+}
+
+/**
  * Soft delete: nunca apagamos dinheiro de verdade — só marcamos deleted_at.
  * mode='all' + parcela: apaga ESTA e as FUTURAS da mesma compra (mesmo
  * installment_group_id e data >= a da clicada). Retorna quantas foram apagadas.
+ * Desfazer um pagamento de fatura é apagar a transação dele (mode single).
  */
 export async function deleteTransaction(
   userId: string,
