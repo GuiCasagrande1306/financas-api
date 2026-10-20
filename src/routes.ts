@@ -17,6 +17,7 @@ import { forecastRouter } from './modules/forecast/forecast.routes';
 import { achievementsRouter } from './modules/achievements/achievements.routes';
 import { goalsRouter } from './modules/goals/goals.routes';
 import { accountsRouter } from './modules/accounts/accounts.routes';
+import { loansRouter, receivablesRouter } from './modules/loans/loans.routes';
 
 export const routes = Router();
 
@@ -45,3 +46,5 @@ routes.use('/recurring', recurringRouter);
 routes.use('/forecast', forecastRouter);
 routes.use('/achievements', achievementsRouter);
 routes.use('/goals', goalsRouter);
+routes.use('/loans', loansRouter);
+routes.use('/receivables', receivablesRouter);

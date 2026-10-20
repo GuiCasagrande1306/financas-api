@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import { isoDay, positiveCents } from '../../lib/zod';
 
-export const transactionKind = z.enum(['expense', 'income', 'transfer']);
+/**
+ * Tipos de lançamento. `loan_out` (dinheiro emprestado saindo da conta) e
+ * `loan_in` (principal de um empréstimo voltando) só nascem pelo módulo de
+ * Empréstimos — criar/editar por /transactions com eles dá 400 (no service, com
+ * mensagem clara). Nenhum dos dois é gasto nem receita.
+ */
+export const transactionKind = z.enum(['expense', 'income', 'transfer', 'loan_out', 'loan_in']);
 
 /**
  * IMPORTANTE: `amount` é sempre em CENTAVOS e positivo (teto R$ 10 bi). O que define
@@ -92,6 +98,8 @@ export function txColumns(alias = ''): string {
     col('installments'),
     col('installment_group_id', 'installmentGroupId'),
     col('invoice_month', 'invoiceMonth'),
+    col('loan_id', 'loanId'),
+    col('loan_installment_id', 'loanInstallmentId'),
     col('created_at', 'createdAt'),
     col('updated_at', 'updatedAt'),
   ].join(',\n  ');
@@ -106,7 +114,7 @@ export interface TransactionRow {
   transferAccountId: string | null;
   categoryId: string | null;
   amount: number;
-  kind: 'expense' | 'income' | 'transfer';
+  kind: 'expense' | 'income' | 'transfer' | 'loan_out' | 'loan_in';
   description: string | null;
   merchant: string | null;
   occurredAt: string;
@@ -117,6 +125,8 @@ export interface TransactionRow {
   installments: string | null;
   installmentGroupId: string | null;
   invoiceMonth: string | null;
+  loanId: string | null; // lançamento gerado por um empréstimo (só muda pela tela de Empréstimos)
+  loanInstallmentId: string | null; // parcela do empréstimo (recebimento)
   createdAt: string;
   updatedAt: string;
 }

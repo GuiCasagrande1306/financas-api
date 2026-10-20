@@ -13,7 +13,19 @@ relacional e já funciona.
 
 ---
 
-## 0. Ordem OBRIGATÓRIA de deploy — versão "Contas, transferências e faturas"
+## 0. Ordem OBRIGATÓRIA de deploy — versão "Empréstimo a receber"
+
+Mesma ordem da seção abaixo: **migração primeiro, backend depois, frontend por último**. Esta
+versão cria as tabelas `loans` e `loan_installments` (com grant para `authenticated`, RLS e
+trigger de `updated_at`), a coluna `loan_installments.remainder_of` (diferença de uma parcela
+recebida a menos que continua sendo cobrada), as colunas `transactions.loan_id` /
+`transactions.loan_installment_id` e troca o CHECK de `transactions.kind` para aceitar `loan_out` e `loan_in` (aditiva e
+idempotente). Toda listagem de transação lê as colunas novas: sem a migração, a API nova
+**se recusa a subir** (o `src/server.ts` também confere essas colunas antes do `listen`).
+
+---
+
+## 0a. Ordem OBRIGATÓRIA de deploy — versão "Contas, transferências e faturas"
 
 Esta versão do backend precisa de colunas novas no banco (`transactions.transfer_account_id`,
 `transactions.invoice_month`, `accounts.updated_at`, `credit_cards.is_archived`,

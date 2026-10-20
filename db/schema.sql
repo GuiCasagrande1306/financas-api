@@ -389,6 +389,103 @@ alter table public.recurring_expenses
   add column if not exists credit_card_id uuid references public.credit_cards(id) on delete set null;
 
 -- ===========================================================================
+-- EMPRÉSTIMOS A RECEBER (migração aditiva — idempotente)
+-- Dinheiro emprestado a alguém e devolvido em parcelas. Valores em CENTAVOS.
+--  - Emprestar (com conta de origem) = transação kind 'loan_out' (sai do saldo,
+--    NÃO é gasto);
+--  - Receber parcela = 'loan_in' com a parte que devolve o principal (entra no
+--    saldo, NÃO é receita) + 'income' (categoria Investimentos) com os juros.
+-- Relatórios/resumo só somam 'expense'/'income' — loan_out/loan_in ficam fora.
+-- ===========================================================================
+create table if not exists public.loans (
+  id                 uuid primary key default gen_random_uuid(),
+  user_id            uuid not null references public.profiles(id) on delete cascade,
+  borrower_name      text not null,                                 -- quem pegou emprestado
+  description        text,
+  notes              text,
+  principal          bigint not null check (principal > 0),         -- CENTAVOS emprestados
+  lent_at            date not null,
+  source_account_id  uuid references public.accounts(id) on delete set null,  -- de onde saiu (opcional)
+  receive_account_id uuid references public.accounts(id) on delete set null,  -- conta padrão p/ receber
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+
+create table if not exists public.loan_installments (
+  id                uuid primary key default gen_random_uuid(),
+  user_id           uuid not null references public.profiles(id) on delete cascade,
+  loan_id           uuid not null references public.loans(id) on delete cascade,
+  number            int not null check (number >= 1),
+  due_date          date not null,
+  amount            bigint not null check (amount > 0),             -- esperado (CENTAVOS)
+  received_at       date,                                           -- NULL = pendente
+  received_amount   bigint check (received_amount is null or received_amount > 0),
+  principal_portion bigint,                                         -- parte do recebido que devolve o principal
+  interest_portion  bigint,                                         -- parte que é juros (vira receita)
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  unique (loan_id, number)
+);
+
+-- Recebeu MENOS que o combinado e escolheu continuar cobrando a diferença: ela vira
+-- uma parcela pendente nova, logo depois desta, com remainder_of = a parcela de origem
+-- (desfazer o recebimento da origem apaga essa parcela e devolve o valor).
+alter table public.loan_installments
+  add column if not exists remainder_of uuid references public.loan_installments(id) on delete set null;
+
+-- transactions: vínculo com o empréstimo (e a parcela) que gerou o lançamento.
+alter table public.transactions
+  add column if not exists loan_id uuid references public.loans(id) on delete set null;
+alter table public.transactions
+  add column if not exists loan_installment_id uuid references public.loan_installments(id) on delete set null;
+
+-- kind passa a aceitar loan_out (dinheiro emprestado saindo da conta) e loan_in
+-- (principal voltando). Troca o CHECK antigo (qualquer nome) pelo novo.
+do $$
+declare c text;
+begin
+  for c in
+    select conname from pg_constraint
+     where conrelid = 'public.transactions'::regclass and contype = 'c'
+       and pg_get_constraintdef(oid) ilike '%kind%'
+  loop
+    execute format('alter table public.transactions drop constraint %I', c);
+  end loop;
+end $$;
+alter table public.transactions add constraint transactions_kind_check
+  check (kind in ('expense', 'income', 'transfer', 'loan_out', 'loan_in'));
+
+create index if not exists idx_loans_user on public.loans(user_id);
+create index if not exists idx_loan_inst_loan on public.loan_installments(loan_id, number);
+create index if not exists idx_loan_inst_pending
+  on public.loan_installments(user_id, due_date) where received_at is null;
+create index if not exists idx_loan_inst_remainder
+  on public.loan_installments(remainder_of) where remainder_of is not null;
+create index if not exists idx_tx_loan on public.transactions(loan_id) where loan_id is not null;
+create index if not exists idx_tx_loan_installment
+  on public.transactions(loan_installment_id) where loan_installment_id is not null;
+
+drop trigger if exists trg_loans_updated on public.loans;
+create trigger trg_loans_updated before update on public.loans
+  for each row execute function public.set_updated_at();
+drop trigger if exists trg_loan_installments_updated on public.loan_installments;
+create trigger trg_loan_installments_updated before update on public.loan_installments
+  for each row execute function public.set_updated_at();
+
+-- Tabela nova SEMPRE com grant (sem ele o supabase-js do usuário leva "permission denied").
+grant select, insert, update, delete on public.loans, public.loan_installments to authenticated;
+
+alter table public.loans enable row level security;
+drop policy if exists "own loans" on public.loans;
+create policy "own loans" on public.loans
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+alter table public.loan_installments enable row level security;
+drop policy if exists "own loan installments" on public.loan_installments;
+create policy "own loan installments" on public.loan_installments
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- ===========================================================================
 -- Cria o profile automaticamente quando um usuário se cadastra no Supabase Auth.
 -- ===========================================================================
 create or replace function public.handle_new_user()

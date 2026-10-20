@@ -14,6 +14,12 @@ import {
 
 type TxKind = TransactionRow['kind'];
 
+/** Lançamentos de empréstimo só nascem e mudam pela tela de Empréstimos (módulo loans). */
+const LOAN_LOCKED_MESSAGE = 'Este lançamento é de um empréstimo. Altere pela tela de Empréstimos.';
+const LOAN_KIND_MESSAGE =
+  'Empréstimo se cadastra em Investimentos → Empréstimos (o app lança a saída e os recebimentos sozinho).';
+const isLoanKind = (kind: TxKind | undefined) => kind === 'loan_out' || kind === 'loan_in';
+
 /** Garante que a categoria (se informada) pertence ao usuário ou é do sistema. */
 async function assertCategoryValid(userId: string, categoryId?: string | null): Promise<void> {
   if (!categoryId) return;
@@ -109,6 +115,7 @@ async function resolveSource(userId: string, src: SourceInput, checks: SourceChe
 
 export async function createTransaction(userId: string, input: CreateTransactionInput) {
   const kind = input.kind ?? 'expense';
+  if (isLoanKind(kind)) throw AppError.badRequest(LOAN_KIND_MESSAGE);
   const parcels = input.installments ?? 1;
   if (kind === 'transfer' && parcels > 1) {
     throw AppError.badRequest('Transferência não pode ser parcelada.');
@@ -357,18 +364,29 @@ export async function updateTransaction(
   const found = await query<
     Pick<
       TransactionRow,
-      'kind' | 'accountId' | 'transferAccountId' | 'creditCardId' | 'categoryId' | 'installments' | 'invoiceMonth'
+      | 'kind'
+      | 'accountId'
+      | 'transferAccountId'
+      | 'creditCardId'
+      | 'categoryId'
+      | 'installments'
+      | 'invoiceMonth'
+      | 'loanId'
     >
   >(
     `SELECT kind, account_id AS "accountId", transfer_account_id AS "transferAccountId",
             credit_card_id AS "creditCardId", category_id AS "categoryId",
-            installments, invoice_month AS "invoiceMonth"
+            installments, invoice_month AS "invoiceMonth", loan_id AS "loanId"
        FROM transactions
       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
     [id, userId],
   );
   if (found.length === 0) throw AppError.notFound('Transação não encontrada');
   const cur = found[0];
+
+  // Lançamento de empréstimo (saída, principal ou juros): só pela tela de Empréstimos.
+  if (cur.loanId || isLoanKind(cur.kind)) throw AppError.badRequest(LOAN_LOCKED_MESSAGE);
+  if (isLoanKind(input.kind)) throw AppError.badRequest(LOAN_KIND_MESSAGE);
 
   const fields: Record<string, unknown> = {};
 
@@ -445,6 +463,7 @@ export async function updateTransaction(
  * mode='all' + parcela: apaga ESTA e as FUTURAS da mesma compra (mesmo
  * installment_group_id e data >= a da clicada). Retorna quantas foram apagadas.
  * Desfazer um pagamento de fatura é apagar a transação dele (mode single).
+ * Lançamento de empréstimo (loan_id) não sai por aqui → 400 (tela de Empréstimos).
  */
 export async function deleteTransaction(
   userId: string,
@@ -452,20 +471,22 @@ export async function deleteTransaction(
   mode: 'single' | 'all' = 'single',
 ): Promise<number> {
   if (mode === 'all') {
-    const found = await query<{ groupId: string | null; occurredAt: string }>(
-      `SELECT installment_group_id AS "groupId", occurred_at AS "occurredAt"
+    const found = await query<{ groupId: string | null; occurredAt: string; loanId: string | null }>(
+      `SELECT installment_group_id AS "groupId", occurred_at AS "occurredAt", loan_id AS "loanId"
          FROM transactions
         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
       [id, userId],
     );
     if (found.length === 0) throw AppError.notFound('Transação não encontrada');
 
-    const { groupId, occurredAt } = found[0];
+    const { groupId, occurredAt, loanId } = found[0];
+    if (loanId) throw AppError.badRequest(LOAN_LOCKED_MESSAGE);
     if (groupId) {
       const deleted = await query<{ id: string }>(
         `UPDATE transactions SET deleted_at = now()
           WHERE user_id = $1 AND installment_group_id = $2
             AND occurred_at >= $3::date AND deleted_at IS NULL
+            AND loan_id IS NULL
           RETURNING id`,
         [userId, groupId, occurredAt],
       );
@@ -474,12 +495,20 @@ export async function deleteTransaction(
     // Sem grupo (compra à vista ou parcela antiga) → cai no comportamento padrão.
   }
 
+  // Uma única instrução: confere "não é de empréstimo" e apaga juntos.
   const rows = await query<{ id: string }>(
     `UPDATE transactions SET deleted_at = now()
-      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND loan_id IS NULL
       RETURNING id`,
     [id, userId],
   );
-  if (rows.length === 0) throw AppError.notFound('Transação não encontrada');
-  return 1;
+  if (rows.length > 0) return 1;
+
+  const exists = await query<{ loanId: string | null }>(
+    `SELECT loan_id AS "loanId" FROM transactions
+      WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+    [id, userId],
+  );
+  if (exists.length === 0) throw AppError.notFound('Transação não encontrada');
+  throw AppError.badRequest(LOAN_LOCKED_MESSAGE);
 }

@@ -4,9 +4,10 @@ import { pool } from './db/pool';
 import { startIndicatorsScheduler } from './lib/scheduler';
 
 /**
- * Colunas que ESTA versão do código exige no banco (migração de contas,
- * transferências e faturas — db/schema.sql). Ordem de deploy obrigatória:
- * migração primeiro, código depois (DEPLOY.md).
+ * Colunas que ESTA versão do código exige no banco (migrações de contas,
+ * transferências e faturas e de empréstimos a receber — db/schema.sql). Ordem de
+ * deploy obrigatória: migração primeiro, código depois (DEPLOY.md).
+ * Toda listagem de transação lê loan_id/loan_installment_id (txColumns).
  */
 const REQUIRED_COLUMNS: [table: string, column: string][] = [
   ['transactions', 'transfer_account_id'],
@@ -15,6 +16,11 @@ const REQUIRED_COLUMNS: [table: string, column: string][] = [
   ['credit_cards', 'is_archived'],
   ['recurring_expenses', 'account_id'],
   ['recurring_expenses', 'credit_card_id'],
+  ['transactions', 'loan_id'],
+  ['transactions', 'loan_installment_id'],
+  ['loans', 'id'],
+  ['loan_installments', 'id'],
+  ['loan_installments', 'remainder_of'],
 ];
 
 /**

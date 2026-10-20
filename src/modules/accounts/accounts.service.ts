@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { pool, query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
 import { addDaysISO, assertDateRange, todaySP } from '../../lib/dates';
+import { LOAN_COLOR } from '../loans/loans.schema';
 import { txColumns, type TransactionRow } from '../transactions/transactions.schema';
 import type { AccountType, CreateAccountInput, UpdateAccountInput } from './accounts.schema';
 
@@ -50,7 +51,9 @@ export interface Account {
  * diz quanto (com sinal) uma transação mexeu em UMA conta:
  *  - income/expense FORA do cartão → +/− na conta `account_id`;
  *  - transfer → − na conta `account_id` (inclui pagamento de fatura);
- *  - transfer com destino → + na conta `transfer_account_id`.
+ *  - transfer com destino → + na conta `transfer_account_id`;
+ *  - loan_out (dinheiro emprestado saindo) → −; loan_in (principal voltando) → +
+ *    (os juros de um empréstimo são um `income` comum).
  * Compra/estorno no cartão NÃO mexe em conta (vira fatura; quem tira dinheiro da
  * conta é o pagamento da fatura). Só linhas não deletadas. `$1` = user_id.
  * `tx_id`/`kind`/`credit_card_id` identificam a transação de origem da perna
@@ -58,7 +61,7 @@ export interface Account {
  */
 const LEGS_SQL = `
   SELECT t.account_id, t.occurred_at,
-         CASE WHEN t.kind = 'income' THEN t.amount ELSE -t.amount END AS delta,
+         CASE WHEN t.kind IN ('income', 'loan_in') THEN t.amount ELSE -t.amount END AS delta,
          t.id AS tx_id, t.kind, t.credit_card_id
     FROM transactions t
    WHERE t.user_id = $1 AND t.deleted_at IS NULL
@@ -130,16 +133,19 @@ export async function getOrCreateDefaultAccount(userId: string): Promise<string>
  * arquivada. Conta arquivada pode continuar numa linha antiga, mas não pode ser
  * escolhida como conta NOVA de um lançamento. Lança 400 com mensagem clara.
  * `label` personaliza a mensagem (ex.: 'de origem', 'de destino').
+ * `client`: dentro de uma transação SQL, confere na MESMA conexão (sem pegar
+ * outra do pool enquanto segura a da transação).
  */
 export async function assertAccountUsable(
   userId: string,
   accountId: string,
-  opts: { allowArchived?: boolean; label?: string } = {},
+  opts: { allowArchived?: boolean; label?: string; client?: PoolClient } = {},
 ): Promise<{ id: string; name: string }> {
-  const rows = await query<{ id: string; name: string; isArchived: boolean }>(
-    `SELECT id, name, is_archived AS "isArchived" FROM accounts WHERE id = $1 AND user_id = $2`,
-    [accountId, userId],
-  );
+  const sql = `SELECT id, name, is_archived AS "isArchived" FROM accounts WHERE id = $1 AND user_id = $2`;
+  type Row = { id: string; name: string; isArchived: boolean };
+  const rows = opts.client
+    ? (await opts.client.query<Row>(sql, [accountId, userId])).rows
+    : await query<Row>(sql, [accountId, userId]);
   const label = opts.label ? ` ${opts.label}` : '';
   if (rows.length === 0) throw AppError.badRequest(`Conta${label} não encontrada`);
   if (rows[0].isArchived && !opts.allowArchived) {
@@ -382,7 +388,7 @@ export interface StatementItem extends TransactionRow {
   categoryName: string | null;
   categoryColor: string | null;
   categoryIcon: string | null;
-  counterpart: { type: 'account' | 'card'; id: string; name: string; color: string } | null;
+  counterpart: { type: 'account' | 'card' | 'loan'; id: string; name: string; color: string } | null;
 }
 
 interface StatementRow extends TransactionRow {
@@ -396,6 +402,8 @@ interface StatementRow extends TransactionRow {
   cpCardId: string | null;
   cpCardName: string | null;
   cpCardColor: string | null;
+  cpLoanId: string | null;
+  cpLoanName: string | null;
 }
 
 // Intervalo máximo do extrato (to − from), em dias.
@@ -422,7 +430,7 @@ export async function getAccountStatement(userId: string, id: string, from: stri
     query<StatementRow>(
       `SELECT ${txColumns('t.')},
               CASE WHEN t.kind = 'transfer' AND t.transfer_account_id = $2 THEN 'in'
-                   WHEN t.kind = 'income' THEN 'in'
+                   WHEN t.kind IN ('income', 'loan_in') THEN 'in'
                    ELSE 'out' END                    AS direction,
               c.name                                 AS "categoryName",
               c.color                                AS "categoryColor",
@@ -432,7 +440,9 @@ export async function getAccountStatement(userId: string, id: string, from: stri
               ca.color                               AS "cpAccountColor",
               cc.id                                  AS "cpCardId",
               cc.name                                AS "cpCardName",
-              cc.color                               AS "cpCardColor"
+              cc.color                               AS "cpCardColor",
+              ln.id                                  AS "cpLoanId",
+              ln.borrower_name                       AS "cpLoanName"
          FROM transactions t
          LEFT JOIN categories c
            ON c.id = t.category_id AND (c.user_id = t.user_id OR c.user_id IS NULL)
@@ -444,6 +454,9 @@ export async function getAccountStatement(userId: string, id: string, from: stri
          -- Pagamento de fatura: o cartão pago.
          LEFT JOIN credit_cards cc
            ON t.kind = 'transfer' AND cc.user_id = t.user_id AND cc.id = t.credit_card_id
+         -- Saída/volta de empréstimo: quem pegou emprestado.
+         LEFT JOIN loans ln
+           ON t.kind IN ('loan_out', 'loan_in') AND ln.user_id = t.user_id AND ln.id = t.loan_id
         WHERE t.user_id = $1 AND t.deleted_at IS NULL
           AND (
                 (t.account_id = $2 AND (t.credit_card_id IS NULL OR t.kind = 'transfer'))
@@ -470,6 +483,8 @@ export async function getAccountStatement(userId: string, id: string, from: stri
       cpCardId,
       cpCardName,
       cpCardColor,
+      cpLoanId,
+      cpLoanName,
       ...tx
     } = r;
     if (r.direction === 'in') {
@@ -486,6 +501,8 @@ export async function getAccountStatement(userId: string, id: string, from: stri
       counterpart = { type: 'account', id: cpAccountId, name: cpAccountName ?? '', color: cpAccountColor ?? '' };
     } else if (cpCardId) {
       counterpart = { type: 'card', id: cpCardId, name: cpCardName ?? '', color: cpCardColor ?? '' };
+    } else if (cpLoanId) {
+      counterpart = { type: 'loan', id: cpLoanId, name: cpLoanName ?? '', color: LOAN_COLOR };
     }
     return { ...tx, balanceAfter: running, counterpart };
   });

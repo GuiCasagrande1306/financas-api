@@ -1,6 +1,7 @@
 import { query } from '../../db/pool';
 import { addMonthsYM, todaySP } from '../../lib/dates';
 import { getAccountBalances, getScheduledAccountMoves } from '../accounts/accounts.service';
+import { getPendingReceiptsByMonth } from '../loans/loans.service';
 
 const MONTH_LABELS = [
   'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
@@ -21,19 +22,27 @@ const ymKey = (y: number, mIndex: number) => `${y}-${String(mIndex + 1).padStart
  * Pagamento de fatura agendado NÃO entra: as compras do cartão já são
  * descontadas pela data da compra. No ponto, `income`/`expense` já incluem os
  * agendados (`scheduledIncome`/`scheduledExpense` mostram a parte agendada).
+ * Parcelas PENDENTES de empréstimos a receber entram como receita esperada no
+ * mês do vencimento (`loanReceipts`, parte de `income`); as atrasadas e as do
+ * resto do mês corrente entram no 1º mês projetado. Para não contar em dobro, os
+ * juros de empréstimo já recebidos ficam FORA da receita média (a previsão já
+ * soma cada parcela futura inteira, principal + juros).
  * "Hoje" e o mês atual são os de America/Sao_Paulo; o saldo de partida é o
  * mesmo do resumo (getAccountBalances: contas não arquivadas até hoje).
  */
 export async function getForecast(userId: string, months: number) {
   const today = todaySP();
-  const [balances, incomeRow, recurringRow, cardRows, scheduledRows] = await Promise.all([
+  const [balances, incomeRow, recurringRow, cardRows, scheduledRows, loanRows] = await Promise.all([
     getAccountBalances(userId),
     // Receita média mensal estimada = entradas dos últimos 90 dias (até hoje) ÷ 3.
     // Receita agendada (data futura) fica fora da média: ela entra no mês dela.
+    // Juros de empréstimo (income com loan_id) também: as parcelas futuras entram
+    // inteiras em `loanReceipts` — contá-los na média seria contar duas vezes.
     query<{ total: number }>(
       `SELECT COALESCE(SUM(amount), 0)::bigint AS total
          FROM transactions
         WHERE user_id = $1 AND deleted_at IS NULL AND kind = 'income'
+          AND loan_id IS NULL
           AND occurred_at >= $2::date - interval '90 days'
           AND occurred_at <= $2::date`,
       [userId, today],
@@ -56,6 +65,8 @@ export async function getForecast(userId: string, months: number) {
     ),
     // Lançamentos agendados que mexem em conta (líquidos por transação), por mês.
     getScheduledAccountMoves(userId, today),
+    // Parcelas pendentes de empréstimos a receber, por mês de vencimento.
+    getPendingReceiptsByMonth(userId),
   ]);
 
   const balance = balances.totals.balance;
@@ -79,6 +90,13 @@ export async function getForecast(userId: string, months: number) {
     scheduledByMonth.set(key, acc);
   }
 
+  // Empréstimos a receber: atrasadas e as do mês corrente vão para o 1º mês projetado.
+  const loanByMonth = new Map<string, number>();
+  for (const r of loanRows) {
+    const key = r.ym <= currentKey ? firstKey : r.ym;
+    loanByMonth.set(key, (loanByMonth.get(key) ?? 0) + r.total);
+  }
+
   const points = [];
   // Ponto 0: hoje (mês atual, saldo real — nada projetado).
   let running = balance;
@@ -92,6 +110,7 @@ export async function getForecast(userId: string, months: number) {
     recurring: 0,
     scheduledIncome: 0,
     scheduledExpense: 0,
+    loanReceipts: 0,
     isToday: true,
   });
 
@@ -100,7 +119,8 @@ export async function getForecast(userId: string, months: number) {
     const key = ymKey(d.getUTCFullYear(), d.getUTCMonth());
     const cardInstallments = cardByMonth.get(key) ?? 0;
     const scheduled = scheduledByMonth.get(key) ?? { inflow: 0, outflow: 0 };
-    const income = estimatedMonthlyIncome + scheduled.inflow;
+    const loanReceipts = loanByMonth.get(key) ?? 0;
+    const income = estimatedMonthlyIncome + scheduled.inflow + loanReceipts;
     const expense = recurringMonthly + cardInstallments + scheduled.outflow;
     running = running + income - expense;
     points.push({
@@ -113,6 +133,7 @@ export async function getForecast(userId: string, months: number) {
       recurring: recurringMonthly,
       scheduledIncome: scheduled.inflow,
       scheduledExpense: scheduled.outflow,
+      loanReceipts,
       isToday: false,
     });
   }
