@@ -1,0 +1,9 @@
+# Gerados pelo ambiente de teste local (nunca versionar)
+.data/
+node_modules/
+*.log
+api.pid
+fixture.env
+tmp/
+# socket do Postgres local (criado na própria pasta)
+.s.PGSQL.*

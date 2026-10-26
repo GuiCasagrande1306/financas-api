@@ -18,8 +18,8 @@ reportsRouter.get(
   }),
 );
 
-// GET /api/reports/sources?from=YYYY-MM-DD&to=YYYY-MM-DD&granularity=day|week|month&source=account:<id>|card:<id>
-// Quanto e quando saiu de cada conta e cartão.
+// GET /api/reports/sources?from=YYYY-MM-DD&to=YYYY-MM-DD&granularity=day|week|month&source=account:<id>|card:<id>&category=<id>|none
+// Quanto e quando saiu de cada conta e cartão (filtros de origem e de categoria combinam).
 reportsRouter.get(
   '/sources',
   validate({ query: sourcesQuery }),

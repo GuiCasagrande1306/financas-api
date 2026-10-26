@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
 import { addMonthsISO, addMonthsYM, todaySP } from '../../lib/dates';
+import { CATEGORY_NONE } from '../../lib/zod';
 import { assertAccountUsable, getOrCreateDefaultAccount } from '../accounts/accounts.service';
 import { cycleForMonth, findCard, invoiceMonthOf } from '../credit-cards/credit-cards.service';
 import {
@@ -254,7 +255,11 @@ export async function listTransactions(userId: string, filters: ListTransactions
     params.push(filters.kind);
     where.push(`t.kind = $${params.length}`);
   }
-  if (filters.categoryId) {
+  if (filters.categoryId === CATEGORY_NONE) {
+    // "Sem categoria" = gasto ou receita sem categoria. Transferência (inclusive
+    // pagamento de fatura) e empréstimo nunca têm categoria — não é pendência.
+    where.push(`t.category_id IS NULL AND t.kind IN ('expense', 'income')`);
+  } else if (filters.categoryId) {
     params.push(filters.categoryId);
     where.push(`t.category_id = $${params.length}`);
   }

@@ -9,6 +9,7 @@ import {
   todaySP,
   weekdayISO,
 } from '../../lib/dates';
+import { CATEGORY_NONE } from '../../lib/zod';
 import type { AccountType } from '../accounts/accounts.schema';
 import type { SourcesQuery } from './reports.schema';
 
@@ -260,11 +261,31 @@ function buildBuckets(from: string, to: string, days: number, granularity: Granu
 }
 
 /**
- * Filtro opcional por origem. Confere a posse do id antes de usar (404 se não
- * for do usuário) e devolve o trecho SQL (parâmetro $4) + o valor.
+ * Filtro opcional já conferido. Recebe a lista de parâmetros da consulta,
+ * acrescenta nela o seu valor (se tiver) e devolve o trecho SQL com o `$n`
+ * certo — assim os filtros combinam em qualquer ordem, sem número fixo.
+ * Tabela com alias `t`. Sem filtro → trecho vazio.
  */
-async function sourceFilter(userId: string, source?: string): Promise<{ sql: string; params: unknown[] }> {
-  if (!source) return { sql: '', params: [] };
+type SqlFilter = (params: unknown[]) => string;
+
+const NO_FILTER: SqlFilter = () => '';
+
+/** Parâmetros-base [userId, from, to] seguidos dos valores dos filtros, na ordem dada. */
+function applyFilters(base: unknown[], ...filters: SqlFilter[]): { sql: string; params: unknown[] } {
+  const params = [...base];
+  const sql = filters
+    .map((f) => f(params))
+    .filter(Boolean)
+    .join(' ');
+  return { sql, params };
+}
+
+/**
+ * Filtro opcional por origem. Confere a posse do id antes de usar (404 se não
+ * for do usuário).
+ */
+async function sourceFilter(userId: string, source?: string): Promise<SqlFilter> {
+  if (!source) return NO_FILTER;
   const sep = source.indexOf(':');
   const type = source.slice(0, sep);
   const id = source.slice(sep + 1);
@@ -273,11 +294,36 @@ async function sourceFilter(userId: string, source?: string): Promise<{ sql: str
     const rows = await query('SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2', [id, userId]);
     if (rows.length === 0) throw AppError.notFound('Conta não encontrada');
     // Só o que saiu/entrou DIRETO na conta (compra no cartão também tem account_id).
-    return { sql: 'AND t.credit_card_id IS NULL AND t.account_id = $4', params: [id] };
+    return (params) => {
+      params.push(id);
+      return `AND t.credit_card_id IS NULL AND t.account_id = $${params.length}`;
+    };
   }
   const rows = await query('SELECT 1 FROM credit_cards WHERE id = $1 AND user_id = $2', [id, userId]);
   if (rows.length === 0) throw AppError.notFound('Cartão não encontrado');
-  return { sql: 'AND t.credit_card_id = $4', params: [id] };
+  return (params) => {
+    params.push(id);
+    return `AND t.credit_card_id = $${params.length}`;
+  };
+}
+
+/**
+ * Filtro opcional por categoria: 'none' = sem categoria; id = só aquela
+ * categoria, que precisa ser visível ao usuário (dele ou do sistema) — senão 404.
+ */
+async function categoryFilter(userId: string, category?: string): Promise<SqlFilter> {
+  if (!category) return NO_FILTER;
+  if (category === CATEGORY_NONE) return () => 'AND t.category_id IS NULL';
+
+  const rows = await query(
+    'SELECT 1 FROM categories WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+    [category, userId],
+  );
+  if (rows.length === 0) throw AppError.notFound('Categoria não encontrada');
+  return (params) => {
+    params.push(category);
+    return `AND t.category_id = $${params.length}`;
+  };
 }
 
 interface SourceTotalsRow extends RawSource {
@@ -328,9 +374,15 @@ interface TopRow {
  * NUNCA entram (senão o cartão contaria em dobro: na compra e no pagamento).
  * Compra no cartão conta na data da compra (cada parcela na data da parcela).
  *
+ * Dois filtros opcionais, que combinam (origem + categoria):
  *  - sources: TODAS as origens com movimento no intervalo, IGNORANDO o filtro
- *    `source` (a UI usa para os chips e o ranking), da que mais gastou para a que menos;
- *  - totals, series, byCategory, byWeekday, topExpenses: respeitam o filtro.
+ *    `source` (a UI usa para os chips e o ranking), da que mais gastou para a que
+ *    menos — mas respeitando `category` (de qual conta/cartão saiu a categoria);
+ *  - byCategory: respeita `source` e IGNORA `category` (a rosca continua com
+ *    todas as categorias, para o usuário trocar de uma para outra);
+ *  - totals, series, byWeekday, topExpenses: respeitam os dois.
+ * Receita não tem categoria de gasto: com `category`, `totals.income` e
+ * `sources[].income` só somam receitas daquela categoria (na prática, 0).
  *
  * Média por dia (`totals.dailyAverage` sobre `totals.days` dias):
  *  - intervalo que contém hoje (America/Sao_Paulo) → dias de `from` até hoje
@@ -344,12 +396,18 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
   const { from, to } = params;
   const days = assertDateRange(from, to, SOURCES_MAX_DAYS);
   const granularity: Granularity = params.granularity ?? autoGranularity(days);
-  const filter = await sourceFilter(userId, params.source);
+  const [bySource, byCategoryFilter] = await Promise.all([
+    sourceFilter(userId, params.source),
+    categoryFilter(userId, params.category),
+  ]);
   const base = [userId, from, to];
-  const filtered = [...base, ...filter.params];
+  // Cada consulta numera os próprios $n (a partir do $4) com os filtros que usa.
+  const forSources = applyFilters(base, byCategoryFilter); // ranking: só a categoria
+  const forCategories = applyFilters(base, bySource); // rosca: só a origem
+  const filtered = applyFilters(base, bySource, byCategoryFilter); // o resto: os dois
 
   const [sourceRows, dailyRows, categoryRows, topRows] = await Promise.all([
-    // Totais por origem no intervalo (sem o filtro `source`).
+    // Totais por origem no intervalo (sem o filtro `source`; com o de categoria).
     query<SourceTotalsRow>(
       `WITH s AS (
          SELECT (t.credit_card_id IS NOT NULL)              AS is_card,
@@ -361,6 +419,7 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
           WHERE t.user_id = $1 AND t.deleted_at IS NULL
             AND t.kind IN ('expense', 'income')
             AND t.occurred_at >= $2::date AND t.occurred_at <= $3::date
+            ${forSources.sql}
           GROUP BY 1, 2
        )
        SELECT CASE WHEN s.is_card THEN 'card' ELSE 'account' END       AS type,
@@ -378,10 +437,10 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
            ON s.is_card AND c.id = s.source_id AND c.user_id = $1
         WHERE s.expense > 0 OR s.income > 0
         ORDER BY s.expense DESC, s.income DESC, COALESCE(c.name, a.name)`,
-      base,
+      forSources.params,
     ),
 
-    // Por dia × origem (com o filtro): base da série, dos totais e do dia da semana.
+    // Por dia × origem (com os dois filtros): base da série, dos totais e do dia da semana.
     query<DailyRow>(
       `SELECT t.occurred_at AS date,
               ${SOURCE_KEY_SQL} AS key,
@@ -392,12 +451,12 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
         WHERE t.user_id = $1 AND t.deleted_at IS NULL
           AND t.kind IN ('expense', 'income')
           AND t.occurred_at >= $2::date AND t.occurred_at <= $3::date
-          ${filter.sql}
+          ${filtered.sql}
         GROUP BY 1, 2`,
-      filtered,
+      filtered.params,
     ),
 
-    // Despesas por categoria (com o filtro). Grupo sem categoria = "Sem categoria".
+    // Despesas por categoria (só com o filtro de origem). Grupo sem categoria = "Sem categoria".
     query<CategoryRawRow>(
       `SELECT c.id AS "categoryId", c.name, c.color, c.icon,
               COALESCE(SUM(t.amount), 0)::bigint AS total
@@ -407,12 +466,12 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
         WHERE t.user_id = $1 AND t.deleted_at IS NULL
           AND t.kind = 'expense'
           AND t.occurred_at >= $2::date AND t.occurred_at <= $3::date
-          ${filter.sql}
+          ${forCategories.sql}
         GROUP BY c.id, c.name, c.color, c.icon`,
-      filtered,
+      forCategories.params,
     ),
 
-    // Maiores despesas do intervalo (com o filtro), já com categoria e origem.
+    // Maiores despesas do intervalo (com os dois filtros), já com categoria e origem.
     query<TopRow>(
       `SELECT t.id, t.description, t.merchant, t.amount,
               t.occurred_at AS "occurredAt", t.installments,
@@ -436,10 +495,10 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
         WHERE t.user_id = $1 AND t.deleted_at IS NULL
           AND t.kind = 'expense'
           AND t.occurred_at >= $2::date AND t.occurred_at <= $3::date
-          ${filter.sql}
+          ${filtered.sql}
         ORDER BY t.amount DESC, t.occurred_at DESC, t.id
         LIMIT ${TOP_EXPENSES_LIMIT}`,
-      filtered,
+      filtered.params,
     ),
   ]);
 
@@ -484,10 +543,14 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
     wd.count += r.count;
   }
 
-  // ---- Categorias (mesma forma do resumo, com "Sem categoria").
+  // ---- Categorias (mesma forma do resumo, com "Sem categoria"). O % é sobre o
+  // gasto da própria rosca (só filtro de origem) — `expense` acima já pode estar
+  // filtrado por categoria. Sem filtro de categoria, os dois totais são iguais.
   const categorized: CategoryTotalRow[] = [];
   let uncategorized = 0;
+  let categoriesExpense = 0;
   for (const r of categoryRows) {
+    categoriesExpense += r.total;
     if (r.categoryId === null) uncategorized += r.total;
     else {
       categorized.push({
@@ -499,7 +562,7 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
       });
     }
   }
-  const byCategory = withCategoryShare(categorized, uncategorized, expense).filter((c) => c.total > 0);
+  const byCategory = withCategoryShare(categorized, uncategorized, categoriesExpense).filter((c) => c.total > 0);
 
   // ---- Maiores gastos.
   const topExpenses = topRows.map((r) => ({
@@ -529,6 +592,7 @@ export async function getSourcesReport(userId: string, params: SourcesQuery) {
     granularity,
     currency: 'BRL' as const,
     source: params.source ?? null,
+    category: params.category ?? null, // id da categoria, 'none' ou null (sem filtro)
     totals: {
       expense,
       income,

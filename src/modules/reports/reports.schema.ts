@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDay } from '../../lib/zod';
+import { categoryFilterParam, isoDay } from '../../lib/zod';
 
 export const annualQuery = z.object({
   // Ano do relatório (ex.: 2026). Ausente => ano atual (resolvido no service).
@@ -27,6 +27,10 @@ export const sourcesQuery = z.object({
     .regex(SOURCE_KEY_RE, "Formato esperado: 'account:<id>' ou 'card:<id>'")
     .transform((s) => s.toLowerCase())
     .optional(),
+  // Filtro opcional por categoria: id da categoria ou 'none' ("Sem categoria").
+  // Vale para totais, série, dia da semana, maiores gastos e origens — NÃO para
+  // byCategory (a rosca segue mostrando todas, para trocar de categoria).
+  category: categoryFilterParam.optional(),
 });
 
 export type AnnualQuery = z.infer<typeof annualQuery>;

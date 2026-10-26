@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDay, positiveCents } from '../../lib/zod';
+import { categoryFilterParam, isoDay, positiveCents } from '../../lib/zod';
 
 /**
  * Tipos de lançamento. `loan_out` (dinheiro emprestado saindo da conta) e
@@ -42,7 +42,9 @@ const MAX_PAGE = 50;
 
 export const listTransactionsQuery = z.object({
   kind: transactionKind.optional(),
-  categoryId: z.string().uuid().optional(),
+  // Id da categoria ou 'none' = gasto/receita sem categoria (transferência,
+  // pagamento de fatura e empréstimo nunca têm categoria e não entram).
+  categoryId: categoryFilterParam.optional(),
   // Linhas que MOVEM a conta (saldo): fora do cartão, transferências de/para ela
   // e pagamentos de fatura feitos com ela. Compra no cartão não entra.
   accountId: z.string().uuid().optional(),

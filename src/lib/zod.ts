@@ -21,6 +21,20 @@ export const isoMonth = z
   .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Formato esperado: YYYY-MM')
   .refine((m) => m >= MIN_ISO_DAY.slice(0, 7) && m <= MAX_ISO_DAY.slice(0, 7), DATE_RANGE_MESSAGE);
 
+/**
+ * Filtro por categoria vindo do cliente: o id (uuid) da categoria OU 'none'
+ * (= "Sem categoria", `category_id IS NULL`). Sai em minúsculas. A visibilidade
+ * do id é conferida no service.
+ */
+export const CATEGORY_NONE = 'none';
+export const categoryFilterParam = z
+  .string()
+  .regex(
+    /^(none|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i,
+    "Formato esperado: id da categoria ou 'none'",
+  )
+  .transform((s) => s.toLowerCase());
+
 /** Teto de qualquer valor monetário de entrada: R$ 10 bilhões, em CENTAVOS. */
 export const MAX_CENTS = 1_000_000_000_000;
 const MAX_CENTS_MESSAGE = 'Valor acima do máximo permitido (R$ 10 bilhões).';
