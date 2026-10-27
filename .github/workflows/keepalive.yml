@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 env:
-  API_URL: ${{ vars.API_URL || 'https://financas-api-sv3f.onrender.com' }}
+  API_URL: ${{ vars.API_URL || 'https://financas-api-five.vercel.app' }}
 
 jobs:
   ping:
