@@ -1,5 +1,5 @@
 import { Pool, types } from 'pg';
-import { env } from '../env';
+import { env, isServerless } from '../env';
 
 /**
  * Type parsers do node-postgres.
@@ -14,13 +14,23 @@ import { env } from '../env';
 types.setTypeParser(20, (value) => (value === null ? null : parseInt(value, 10)));
 types.setTypeParser(1082, (value) => value);
 
+/**
+ * Pool de conexões.
+ * - Servidor tradicional (Render/harness): um processo só, até 10 conexões.
+ * - Serverless (Vercel): CADA instância da função tem o próprio pool — poucas
+ *   conexões (3) e ociosa fecha rápido (10 s), para várias instâncias não
+ *   esgotarem o pooler do Supabase.
+ * Funciona com o pooler do Supabase em modo sessão (5432) e transação (6543): o
+ * código não usa prepared statement nomeado, SET de sessão, LISTEN/NOTIFY nem
+ * advisory lock de sessão (só pg_advisory_xact_lock, dentro de BEGIN…COMMIT).
+ */
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
   // O Supabase exige SSL. rejectUnauthorized:false evita erro de cadeia de
   // certificado em ambientes locais; em produção você pode fornecer o CA.
   ssl: { rejectUnauthorized: false },
-  max: 10,
-  idleTimeoutMillis: 30_000,
+  max: isServerless ? 3 : 10,
+  idleTimeoutMillis: isServerless ? 10_000 : 30_000,
   connectionTimeoutMillis: 10_000,
 });
 

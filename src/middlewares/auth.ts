@@ -1,6 +1,6 @@
 import { RequestHandler } from 'express';
 import jwt from 'jsonwebtoken';
-import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify } from 'jose';
+import { createRemoteJWKSet, decodeProtectedHeader, errors, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { env, isProd } from '../env';
 import { AppError } from '../lib/AppError';
 
@@ -15,17 +15,41 @@ declare global {
 }
 
 /**
+ * Erros da busca de chave que são culpa do TOKEN (→ 401): nenhuma chave com o `kid`
+ * dele, mais de uma, ou `alg` que o JWKS não aceita. O resto que sai da busca do JWKS —
+ * sem rede, timeout, resposta diferente de 200, JSON inválido — é o Supabase indisponível.
+ */
+const TOKEN_KEY_ERRORS = [errors.JWKSNoMatchingKey, errors.JWKSMultipleMatchingKeys, errors.JOSENotSupported];
+
+/**
  * JWKS remoto do Supabase: chaves públicas usadas para validar os tokens
  * assinados com chaves ASSIMÉTRICAS (ES256/RS256), o padrão atual do Supabase.
  * A biblioteca faz cache das chaves e resolve pelo `kid` do token.
+ *
+ * Falha AO BUSCAR as chaves vira 503 (não 401): o token pode estar ótimo, e o app
+ * trata 401 como sessão morta (desloga e apaga os dados guardados). Na Vercel isso
+ * pesa mais — cada instância nova busca o JWKS de novo.
  */
-let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
-function getJWKS() {
+let jwks: JWTVerifyGetKey | null = null;
+function getJWKS(): JWTVerifyGetKey {
   if (!env.SUPABASE_URL) {
     throw new AppError(500, 'SUPABASE_URL não configurado (necessário para validar o JWT)', 'CONFIG_ERROR');
   }
   if (!jwks) {
-    jwks = createRemoteJWKSet(new URL(`${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`));
+    const remote = createRemoteJWKSet(new URL(`${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`));
+    jwks = async (protectedHeader, token) => {
+      try {
+        return await remote(protectedHeader, token);
+      } catch (err) {
+        if (TOKEN_KEY_ERRORS.some((TokenError) => err instanceof TokenError)) throw err;
+        console.warn('⚠️  Falha ao buscar as chaves (JWKS) do Supabase:', (err as Error)?.message ?? err);
+        throw new AppError(
+          503,
+          'Não foi possível validar a sessão agora. Tente de novo em instantes.',
+          'AUTH_UNAVAILABLE',
+        );
+      }
+    };
   }
   return jwks;
 }
@@ -69,7 +93,7 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     req.userId = sub;
     next();
   } catch (err) {
-    // AppError (ex.: erro de config) preserva seu status; o resto vira 401.
+    // AppError (erro de config, JWKS indisponível → 503) preserva seu status; o resto vira 401.
     if (err instanceof AppError) return next(err);
     return next(AppError.unauthorized('Token inválido ou expirado'));
   }

@@ -244,10 +244,15 @@ export async function getScheduledAccountMoves(userId: string, today: string): P
 }
 
 /**
- * Lista as contas (com saldo e movimento do mês). Antes, garante a conta
- * padrão — a lista nunca vem vazia.
+ * Lista as contas (com saldo e movimento do mês). A lista nunca vem sem conta
+ * ativa: se não houver nenhuma, cria a conta padrão e lista de novo. No caso
+ * comum (já tem conta ativa) é UMA consulta só — a trava e o INSERT da conta
+ * padrão só acontecem quando ela falta.
  */
 export async function listAccounts(userId: string, includeArchived = false) {
+  const result = await getAccountBalances(userId, { includeArchived });
+  if (result.data.some((a) => !a.isArchived)) return result;
+
   await getOrCreateDefaultAccount(userId);
   return getAccountBalances(userId, { includeArchived });
 }
@@ -418,9 +423,11 @@ const STATEMENT_MAX_DAYS = 366;
  */
 export async function getAccountStatement(userId: string, id: string, from: string, to: string) {
   const days = assertDateRange(from, to, STATEMENT_MAX_DAYS); // nº de dias de from..to (inclusivo)
-  const account = await getAccount(userId, id);
 
-  const [openingRows, rows] = await Promise.all([
+  // As 3 consultas juntas (uma ida e volta): as duas do extrato filtram por user_id,
+  // então conta de outro usuário dá 404 no getAccount e as outras só voltam vazias.
+  const [account, openingRows, rows] = await Promise.all([
+    getAccount(userId, id),
     query<{ total: number }>(
       `SELECT COALESCE(SUM(l.delta), 0)::bigint AS total
          FROM (${LEGS_SQL}) l

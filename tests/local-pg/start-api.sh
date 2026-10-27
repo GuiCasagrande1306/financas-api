@@ -6,7 +6,14 @@
 #  - recusa subir se a porta 3333 já estiver ocupada por outro processo;
 #  - espera o /health e confere por lsof que a única conexão de banco é com :54329.
 # O código é lido UMA vez: mudou o backend? ./stop-api.sh && ./start-api.sh
-# Uso: ./start-api.sh
+# Uso: ./start-api.sh                 servidor tradicional (src/server.ts) — o de sempre
+#      ./start-api.sh --serverless    handler da Vercel (api/index.ts) num http.createServer,
+#                                     com VERCEL=1 (pool e checagem de schema do serverless)
+#      ./start-api.sh --harness       createApp() do servidor tradicional, sem o boot
+#      --query-delay=N                (só --serverless/--harness) atrasa cada consulta em N ms
+#      --entry=/caminho/index.js      (só --serverless) serve um handler JÁ COMPILADO, ex.:
+#                                     a saída do `vercel build` (.vercel/output/functions/api/index.func/api/index.js)
+# Os dois modos de teste (serve-handler.ts) contam as consultas: GET /__harness/queries.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 API_DIR="$(cd "$HERE/../.." && pwd)"
@@ -16,6 +23,40 @@ DATABASE_URL_LOCAL="postgresql://postgres@127.0.0.1:54329/financas_test?sslmode=
 cd "$HERE"
 
 fail() { echo "❌ $*"; exit 1; }
+
+MODE=server
+DELAY_MS=0
+HANDLER_ENTRY=vercel
+for arg in "$@"; do
+  case "$arg" in
+    --serverless) MODE=serverless ;;
+    --harness) MODE=harness ;;
+    --query-delay=*) DELAY_MS="${arg#--query-delay=}" ;;
+    --entry=*) HANDLER_ENTRY="${arg#--entry=}" ;;
+    *) fail "Opção desconhecida: $arg (use --serverless, --harness, --query-delay=N ou --entry=arquivo.js)" ;;
+  esac
+done
+[[ "$DELAY_MS" =~ ^[0-9]+$ ]] || fail "--query-delay precisa ser um número de ms."
+[ "$MODE" != server ] || [ "$DELAY_MS" = 0 ] || fail "--query-delay só vale com --serverless ou --harness."
+if [ "$HANDLER_ENTRY" != vercel ]; then
+  [ "$MODE" = serverless ] || fail "--entry só vale com --serverless."
+  case "$HANDLER_ENTRY" in /*) ;; *) fail "--entry precisa de caminho absoluto." ;; esac
+  [ -f "$HANDLER_ENTRY" ] || fail "--entry: arquivo não encontrado: $HANDLER_ENTRY"
+fi
+
+# Entrada e variáveis extras de cada modo (bash 3.2: array vazio não pode ir cru com set -u).
+ENTRY_FILE="src/server.ts"
+EXTRA_ENV=()
+case "$MODE" in
+  serverless)
+    ENTRY_FILE="tests/local-pg/serve-handler.ts"
+    EXTRA_ENV=(VERCEL=1 HARNESS_ENTRY="$HANDLER_ENTRY" HARNESS_QUERY_DELAY_MS="$DELAY_MS")
+    ;;
+  harness)
+    ENTRY_FILE="tests/local-pg/serve-handler.ts"
+    EXTRA_ENV=(HARNESS_ENTRY=app HARNESS_QUERY_DELAY_MS="$DELAY_MS")
+    ;;
+esac
 
 # ---- pré-requisitos ---------------------------------------------------------
 [ -f fixture.env ] || fail "fixture.env não existe — rode ./reset-db.sh primeiro."
@@ -28,7 +69,7 @@ TEST_USER_ID="$(sed -n 's/^TEST_USER_ID=//p' fixture.env)"
 LISTENER="$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
 if [ -n "$LISTENER" ]; then
   if [ -f api.pid ] && grep -qw "$LISTENER" api.pid; then
-    echo "✅ API local já está rodando (PID $LISTENER)."
+    echo "✅ API local já está rodando (PID $LISTENER). Para trocar de modo: ./stop-api.sh antes."
     node check-api.mjs
     exit 0
   fi
@@ -62,7 +103,9 @@ nohup env -i \
   SUPABASE_URL= SUPABASE_ANON_KEY= CORS_ORIGIN= \
   GEMINI_API_KEY= GEMINI_MODEL= \
   PLUGGY_CLIENT_ID= PLUGGY_CLIENT_SECRET= PLUGGY_WEBHOOK_SECRET= \
-  "$API_DIR/node_modules/.bin/tsx" src/server.ts >"$HERE/api.log" 2>&1 &
+  CRON_SECRET= \
+  ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
+  "$API_DIR/node_modules/.bin/tsx" "$ENTRY_FILE" >"$HERE/api.log" 2>&1 &
 LAUNCHER=$!
 cd "$HERE"
 
@@ -92,4 +135,4 @@ if ! node check-api.mjs; then
   ./stop-api.sh >/dev/null
   fail "Conferência da conexão falhou — API derrubada."
 fi
-echo "✅ API local em http://localhost:$PORT (PID $LISTENER · usuário $TEST_USER_ID · log em api.log)"
+echo "✅ API local em http://localhost:$PORT (modo $MODE · PID $LISTENER · usuário $TEST_USER_ID · log em api.log)"

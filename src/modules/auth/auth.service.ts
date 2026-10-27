@@ -1,4 +1,5 @@
-import { supabase } from '../../lib/supabase';
+import { isAuthRetryableFetchError, type AuthError } from '@supabase/supabase-js';
+import { createAuthClient } from '../../lib/supabase';
 import { query } from '../../db/pool';
 import { AppError } from '../../lib/AppError';
 import type { SigninInput, SignupInput } from './auth.schema';
@@ -19,15 +20,39 @@ function mapSession(session: SupabaseSession) {
   };
 }
 
+/** Cliente novo do Supabase Auth para ESTA operação (ver lib/supabase.ts). */
 function ensureConfigured() {
-  if (!supabase) {
+  const client = createAuthClient();
+  if (!client) {
     throw new AppError(
       500,
       'Supabase Auth não configurado (defina SUPABASE_URL e SUPABASE_ANON_KEY)',
       'CONFIG_ERROR',
     );
   }
-  return supabase;
+  return client;
+}
+
+/**
+ * Erro do Supabase Auth que NÃO diz nada sobre a credencial: sem rede até o Supabase
+ * (status 0), Supabase fora do ar (5xx), resposta que não é JSON (AuthUnknownError) ou
+ * limite de chamadas (429). Vira 503/429 — nunca 401, que o app trata como sessão morta
+ * (desloga e apaga os dados guardados). `null` = erro de verdade da credencial.
+ */
+function unavailableError(error: AuthError): AppError | null {
+  if (error.status === 429) {
+    return new AppError(429, 'Muitas tentativas. Tente novamente em alguns minutos.', 'RATE_LIMITED');
+  }
+  const status = error.status ?? 0;
+  if (isAuthRetryableFetchError(error) || error.name === 'AuthUnknownError' || status === 0 || status >= 500) {
+    console.warn(`⚠️  Supabase Auth indisponível (${error.name} ${status}): ${error.message}`);
+    return new AppError(
+      503,
+      'Não foi possível falar com o serviço de login agora. Tente de novo em instantes.',
+      'AUTH_UNAVAILABLE',
+    );
+  }
+  return null;
 }
 
 export async function signup(input: SignupInput) {
@@ -41,6 +66,8 @@ export async function signup(input: SignupInput) {
   });
 
   if (error) {
+    const unavailable = unavailableError(error);
+    if (unavailable) throw unavailable;
     if (/already registered|already exists|already been registered/i.test(error.message)) {
       throw AppError.conflict('E-mail já cadastrado');
     }
@@ -64,6 +91,8 @@ export async function signin(input: SigninInput) {
   });
 
   if (error || !data.user) {
+    const unavailable = error && unavailableError(error);
+    if (unavailable) throw unavailable;
     // Mensagem genérica de propósito: não revela se o e-mail existe.
     throw AppError.unauthorized('E-mail ou senha inválidos');
   }
@@ -75,12 +104,18 @@ export async function signin(input: SigninInput) {
   };
 }
 
-/** Troca um refresh token por uma sessão nova (access + refresh + expiração). */
+/**
+ * Troca um refresh token por uma sessão nova (access + refresh + expiração).
+ * 401 só quando o Supabase RECUSA o refresh token (inválido, já usado, sessão
+ * encerrada); falha passageira do Supabase → 503/429 e o app mantém a sessão.
+ */
 export async function refresh(refreshToken: string) {
   const client = ensureConfigured();
 
   const { data, error } = await client.auth.refreshSession({ refresh_token: refreshToken });
   if (error || !data.session) {
+    const unavailable = error && unavailableError(error);
+    if (unavailable) throw unavailable;
     throw AppError.unauthorized('Sessão expirada, faça login novamente');
   }
 

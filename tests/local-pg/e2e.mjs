@@ -19,6 +19,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
+  API_URL,
   DB_NAME,
   HERE,
   addDays,
@@ -880,6 +881,112 @@ section('relatório por origem: filtro por categoria', async (ctx) => {
   const julyAfter = await report(JULY);
   assert.deepEqual([julyAfter.totals.expense, julyAfter.totals.income, julyAfter.sources], [0, 0, []]);
   assert.equal((await report(PERIOD)).totals.expense, 146050);
+});
+
+section('infra: preflight do CORS, rota do cron, webhook e limite do recibo', async () => {
+  // Preflight guardado 2 h pelo navegador (sem OPTIONS antes de cada chamada). Não toca o banco.
+  const pre = await fetch(`${API_URL}/api/summary`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'http://localhost:5186',
+      'Access-Control-Request-Method': 'GET',
+      'Access-Control-Request-Headers': 'authorization',
+    },
+  });
+  assert.equal(pre.status, 204, 'preflight');
+  assert.equal(pre.headers.get('access-control-max-age'), '7200', 'Access-Control-Max-Age');
+
+  // Cron: a rota só existe na função da Vercel (VERCEL=1, o --serverless). Lá só o agendador
+  // passa: sem o user-agent dele (o harness sobe sem CRON_SECRET, em desenvolvimento) → 401,
+  // sem chamar o BCB. (O caminho feliz depende da rede — fica fora do e2e; o 503 de produção
+  // sem CRON_SECRET não dá para subir aqui, NODE_ENV é development.) No servidor tradicional
+  // o node-cron roda no processo e a rota não é montada → 404 (com o bypass de dev).
+  const harness = await fetch(`${API_URL}/__harness/queries`).then((r) => (r.ok ? r.json() : null));
+  const serverless = harness?.vercel === '1';
+  if (serverless) {
+    await expectStatus('GET', '/cron/indicators', undefined, 401, 'agendador');
+    const bearer = await fetch(`${API_URL}/api/cron/indicators`, { headers: { Authorization: 'Bearer qualquer' } });
+    assert.equal(bearer.status, 401, 'Bearer sem CRON_SECRET no servidor não vale');
+  } else {
+    await expectStatus('GET', '/cron/indicators', undefined, 404, 'Rota não encontrada');
+    const forged = await fetch(`${API_URL}/api/cron/indicators`, { headers: { 'user-agent': 'vercel-cron/1.0' } });
+    assert.equal(forged.status, 404, 'servidor tradicional: user-agent do cron não abre nada');
+  }
+  const post = await fetch(`${API_URL}/api/cron/indicators`, { method: 'POST', headers: { 'user-agent': 'vercel-cron/1.0' } });
+  assert.equal(post.status, 404, 'só GET');
+
+  // Webhook da Pluggy (público): 200 na hora, importação depois da resposta (waitUntil na
+  // Vercel). Item que não é de ninguém / evento irrelevante / corpo vazio: nada a importar,
+  // sem chamar a Pluggy (o harness sobe sem PLUGGY_*).
+  for (const body of [{ event: 'item/updated', itemId: 'item-inexistente-e2e' }, { event: 'connector/status_updated' }, {}]) {
+    const r = await fetch(`${API_URL}/api/open-finance/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(r.status, 200, `webhook ${JSON.stringify(body)}`);
+    assert.deepEqual(await r.json(), { received: true });
+  }
+
+  // Recibo acima de 4 MB → 400 claro (a Vercel recusa requisição > 4,5 MB antes da função).
+  const scan = async (bytes, type = 'image/jpeg') => {
+    const form = new FormData();
+    form.append('image', new Blob([new Uint8Array(bytes)], { type }), 'recibo.jpg');
+    const res = await fetch(`${API_URL}/api/transactions/scan`, { method: 'POST', body: form });
+    return { status: res.status, body: await res.json() };
+  };
+  for (const bytes of [4 * 1024 * 1024 + 1, Math.round(4.5 * 1024 * 1024)]) {
+    const r = await scan(bytes);
+    assert.equal(r.status, 400, `${bytes} bytes: ${JSON.stringify(r.body)}`);
+    assert.equal(
+      r.body.error.message,
+      'Imagem muito grande (máx. 4 MB). Envie uma foto menor ou com resolução mais baixa.',
+    );
+  }
+  // Abaixo do limite passa do upload (aqui sem GEMINI_API_KEY → erro de configuração, não de tamanho).
+  const small = await scan(1024 * 1024);
+  assert.notEqual(small.body?.error?.message?.startsWith('Imagem muito grande'), true, JSON.stringify(small.body));
+  assert.equal((await scan(1000, 'text/plain')).status, 400, 'só imagem');
+});
+
+section('conta padrão: GETs simultâneos sem conta ativa criam UMA Carteira', async (ctx) => {
+  const uid = ctx.fx.TEST_USER_ID;
+  const db = (sql, params) => withLocalClient(DB_NAME, async (c) => (await c.query(sql, params)).rows);
+  const before = await db('SELECT id FROM accounts WHERE user_id = $1 AND is_archived = false', [uid]);
+  assert.ok(before.length > 0, 'fixture com contas ativas');
+  let created = [];
+  // Arquiva TODAS direto no banco local (pela API a última ativa não arquiva) e desfaz no fim.
+  await db('UPDATE accounts SET is_archived = true WHERE user_id = $1', [uid]);
+  try {
+    const N = 20;
+    const rs = await Promise.all(
+      Array.from({ length: N }, (_, i) => api('GET', i % 2 ? '/accounts' : '/accounts?includeArchived=true')),
+    );
+    assert.deepEqual([...new Set(rs.map((r) => r.status))], [200], JSON.stringify(rs.find((r) => r.status !== 200)));
+    created = await db(
+      `SELECT id, name, type FROM accounts WHERE user_id = $1 AND is_archived = false`,
+      [uid],
+    );
+    assert.equal(created.length, 1, `${N} GETs juntos → 1 conta nova: ${JSON.stringify(created)}`);
+    assert.deepEqual([created[0].name, created[0].type], ['Carteira', 'cash']);
+    for (const r of rs) {
+      assert.equal(r.body.data[0].id, created[0].id, 'toda resposta já traz a Carteira (ativa primeiro)');
+    }
+    // Já existe conta ativa: o GET não cria mais nada.
+    await get('/accounts');
+    assert.equal((await db('SELECT id FROM accounts WHERE user_id = $1', [uid])).length, before.length + 1);
+  } finally {
+    for (const a of created) await db('DELETE FROM accounts WHERE id = $1 AND user_id = $2', [a.id, uid]);
+    await db('UPDATE accounts SET is_archived = false WHERE user_id = $1 AND id = ANY($2::uuid[])', [
+      uid,
+      before.map((a) => a.id),
+    ]);
+  }
+  assert.deepEqual(
+    (await get('/accounts')).data.map((a) => a.id).sort(),
+    before.map((a) => a.id).sort(),
+    'contas do fixture de volta',
+  );
 });
 
 // >>> ACRESCENTE NOVAS SEÇÕES AQUI <<<

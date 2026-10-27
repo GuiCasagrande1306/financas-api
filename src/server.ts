@@ -1,27 +1,14 @@
 import { createApp } from './app';
 import { env } from './env';
 import { pool } from './db/pool';
+import { findMissingColumns, schemaOutdatedMessage } from './db/schema-check';
 import { startIndicatorsScheduler } from './lib/scheduler';
 
 /**
- * Colunas que ESTA versão do código exige no banco (migrações de contas,
- * transferências e faturas e de empréstimos a receber — db/schema.sql). Ordem de
- * deploy obrigatória: migração primeiro, código depois (DEPLOY.md).
- * Toda listagem de transação lê loan_id/loan_installment_id (txColumns).
+ * Servidor TRADICIONAL (Render, Docker, harness local): listen + cron das taxas.
+ * Na Vercel a entrada é outra (src/vercel.ts, via api/index.ts) — sem listen,
+ * sem process.exit e com o schema conferido na 1ª requisição.
  */
-const REQUIRED_COLUMNS: [table: string, column: string][] = [
-  ['transactions', 'transfer_account_id'],
-  ['transactions', 'invoice_month'],
-  ['accounts', 'updated_at'],
-  ['credit_cards', 'is_archived'],
-  ['recurring_expenses', 'account_id'],
-  ['recurring_expenses', 'credit_card_id'],
-  ['transactions', 'loan_id'],
-  ['transactions', 'loan_installment_id'],
-  ['loans', 'id'],
-  ['loan_installments', 'id'],
-  ['loan_installments', 'remainder_of'],
-];
 
 /**
  * Recusa subir com o banco sem a migração (fail-fast): o processo sai com
@@ -29,19 +16,9 @@ const REQUIRED_COLUMNS: [table: string, column: string][] = [
  * continua no ar — em vez de a nova responder 500 em toda rota de dinheiro.
  */
 async function assertSchemaUpToDate(): Promise<void> {
-  const { rows } = await pool.query<{ table_name: string; column_name: string }>(
-    `SELECT table_name, column_name
-       FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = ANY($1::text[])`,
-    [[...new Set(REQUIRED_COLUMNS.map(([table]) => table))]],
-  );
-  const present = new Set(rows.map((r) => `${r.table_name}.${r.column_name}`));
-  const missing = REQUIRED_COLUMNS.map(([t, c]) => `${t}.${c}`).filter((col) => !present.has(col));
+  const missing = await findMissingColumns();
   if (missing.length > 0) {
-    console.error(
-      `❌ Banco desatualizado: faltam as colunas ${missing.join(', ')}. ` +
-        'Rode db/migrate.js antes de subir esta versão (ordem em DEPLOY.md).',
-    );
+    console.error(`❌ ${schemaOutdatedMessage(missing)}`);
     process.exit(1);
   }
 }

@@ -21,15 +21,19 @@ export async function getSummary(userId: string, month?: string) {
   // Primeiro dia do mês alvo ('YYYY-MM-01'); sem mês → mês corrente em America/Sao_Paulo.
   const monthStart = `${month ?? currentMonthSP()}-01`;
 
-  const [balances, totalsRow, byCategory, uncategorizedRow] = await Promise.all([
+  // 3 consultas em paralelo (uma ida e volta ao banco).
+  const [balances, totalsRow, byCategory] = await Promise.all([
     // Saldo atual: soma das contas não arquivadas até hoje (uma query, GROUP BY).
     getAccountBalances(userId),
 
-    // Totais do mês (receitas e despesas).
-    query<{ income: number; expense: number }>(
+    // Totais do mês (receitas e despesas) + despesas sem categoria (viram a
+    // fatia "Sem categoria") — mesmo filtro, uma consulta só.
+    query<{ income: number; expense: number; uncategorized: number }>(
       `SELECT
           COALESCE(SUM(amount) FILTER (WHERE kind = 'income'), 0)::bigint  AS income,
-          COALESCE(SUM(amount) FILTER (WHERE kind = 'expense'), 0)::bigint AS expense
+          COALESCE(SUM(amount) FILTER (WHERE kind = 'expense'), 0)::bigint AS expense,
+          COALESCE(SUM(amount) FILTER (WHERE kind = 'expense' AND category_id IS NULL), 0)::bigint
+            AS uncategorized
        FROM transactions
       WHERE user_id = $1
         AND deleted_at IS NULL
@@ -53,26 +57,13 @@ export async function getSummary(userId: string, month?: string) {
         ORDER BY total DESC`,
       [userId, monthStart],
     ),
-
-    // Despesas sem categoria no mês (aparecem como "Sem categoria").
-    query<{ total: number }>(
-      `SELECT COALESCE(SUM(amount), 0)::bigint AS total
-         FROM transactions
-        WHERE user_id = $1
-          AND deleted_at IS NULL
-          AND kind = 'expense'
-          AND category_id IS NULL
-          AND occurred_at >= $2::date
-          AND occurred_at <  ($2::date + interval '1 month')`,
-      [userId, monthStart],
-    ),
   ]);
 
   const income = totalsRow[0].income;
   const expense = totalsRow[0].expense;
 
   // Categorizadas + fatia "Sem categoria", com o % sobre as despesas (2 casas).
-  const byCategoryWithShare = withCategoryShare(byCategory, uncategorizedRow[0].total, expense);
+  const byCategoryWithShare = withCategoryShare(byCategory, totalsRow[0].uncategorized, expense);
 
   return {
     month: monthStart.slice(0, 7),

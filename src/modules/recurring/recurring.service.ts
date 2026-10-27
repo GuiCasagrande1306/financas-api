@@ -134,20 +134,26 @@ export async function postDueRecurring(userId: string): Promise<number> {
   return posted;
 }
 
-/**
- * Lista as recorrências do usuário já com o próximo vencimento, o resumo
- * (total mensal/anual) e a lista de "vence em breve" (para o alerta).
- * Antes, dispara o lançamento automático das que já venceram.
- */
-export async function listRecurring(userId: string) {
-  await postDueRecurring(userId);
-
-  const rows = await query<RecurringRow>(
+/** Recorrências do usuário (ativas primeiro, por dia de vencimento). */
+function selectRecurring(userId: string): Promise<RecurringRow[]> {
+  return query<RecurringRow>(
     `SELECT ${COLS} FROM recurring_expenses
       WHERE user_id = $1
       ORDER BY is_active DESC, due_day ASC, created_at`,
     [userId],
   );
+}
+
+/**
+ * Lista as recorrências do usuário já com o próximo vencimento, o resumo
+ * (total mensal/anual) e a lista de "vence em breve" (para o alerta).
+ * Também dispara o lançamento automático das que já venceram — EM PARALELO com a
+ * leitura da lista (uma ida e volta ao banco no caso comum, em que nada vence).
+ * Se algo foi lançado agora, a lista é lida de novo (last_posted/updated_at mudaram).
+ */
+export async function listRecurring(userId: string) {
+  const [posted, firstRead] = await Promise.all([postDueRecurring(userId), selectRecurring(userId)]);
+  const rows = posted > 0 ? await selectRecurring(userId) : firstRead;
 
   const data = rows.map((r) => {
     const nd = nextDue(r.dueDay);

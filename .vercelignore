@@ -1,0 +1,17 @@
+# Fora do deploy da Vercel. A função só precisa de api/, src/, public/, package*.json,
+# tsconfig.json e vercel.json (o @vercel/node compila o TypeScript e empacota o resto).
+# Padrão com "/" no começo = só na raiz (sem a barra, "db" também tiraria o src/db!).
+# NUNCA subir o .env: ele é o banco de PRODUÇÃO deste computador.
+.env
+.env.*
+node_modules
+*.log
+.DS_Store
+/.git
+/.github
+/dist
+/tests
+/db
+/Dockerfile
+/.dockerignore
+/render.yaml

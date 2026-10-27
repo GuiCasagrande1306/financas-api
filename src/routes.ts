@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { isServerless } from './env';
 import { authenticate } from './middlewares/auth';
 import { authLimiter } from './middlewares/rateLimit';
 import { authRouter } from './modules/auth/auth.routes';
@@ -18,6 +19,7 @@ import { achievementsRouter } from './modules/achievements/achievements.routes';
 import { goalsRouter } from './modules/goals/goals.routes';
 import { accountsRouter } from './modules/accounts/accounts.routes';
 import { loansRouter, receivablesRouter } from './modules/loans/loans.routes';
+import { cronRouter } from './modules/cron/cron.routes';
 
 export const routes = Router();
 
@@ -28,6 +30,10 @@ routes.use('/auth', authLimiter, authRouter);
 routes.use('/indicators', indicatorsRouter);
 // Webhook da Pluggy é PÚBLICO (chamado pela Pluggy, sem token).
 routes.use('/open-finance/webhook', openFinanceWebhookRouter);
+// Tarefas agendadas (Vercel Cron): sem token de usuário, mas só aceitam o agendador.
+// Só na função da Vercel — no servidor tradicional o node-cron roda no próprio processo
+// e a rota não existe (cai no `authenticate` abaixo, como qualquer rota desconhecida).
+if (isServerless) routes.use('/cron', cronRouter);
 
 // Daqui pra baixo, toda rota exige um usuário autenticado.
 routes.use(authenticate);

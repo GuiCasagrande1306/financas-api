@@ -1,6 +1,11 @@
 # Mantém o projeto do Supabase ativo: o plano grátis pausa depois de ~7 dias sem uso.
-# A cada 3 dias acorda a API no Render (cold start ~50s) e chama uma rota pública
-# que lê o banco (GET /api/indicators → tabela economic_indicators).
+# A cada 3 dias chama uma rota pública da API que lê o banco
+# (GET /api/indicators → tabela economic_indicators). No Render, isso também acorda a
+# API (cold start ~50 s); na Vercel a resposta é imediata.
+#
+# URL da API: variável do repositório API_URL (GitHub → Settings → Secrets and
+# variables → Actions → Variables). Sem ela, usa a do Render. Para apontar para a
+# Vercel, basta criar/editar a variável — este arquivo não muda.
 name: Manter banco ativo
 
 on:
@@ -8,14 +13,19 @@ on:
     - cron: '0 12 */3 * *' # 09:00 em Brasília, a cada 3 dias
   workflow_dispatch:
 
+env:
+  API_URL: ${{ vars.API_URL || 'https://financas-api-sv3f.onrender.com' }}
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
       - name: Acordar a API e consultar o banco
         run: |
+          url="${API_URL%/}/api/indicators"
+          echo "GET $url"
           for i in 1 2 3 4 5; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 https://financas-api-sv3f.onrender.com/api/indicators || true)
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 "$url" || true)
             if [ "$code" = "200" ]; then echo "ok ($code)"; exit 0; fi
             echo "tentativa $i: HTTP $code"
             sleep 30

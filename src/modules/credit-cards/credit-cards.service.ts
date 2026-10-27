@@ -59,37 +59,39 @@ export function currentCycle(closingDay: number, ref = todayRef()): { start: str
   };
 }
 
-/** Soma da fatura atual (despesas do cartão dentro do ciclo aberto). */
-async function invoiceTotal(userId: string, cardId: string, closingDay: number): Promise<number> {
-  const { start, end } = currentCycle(closingDay);
-  const rows = await query<{ total: number }>(
-    `SELECT COALESCE(SUM(amount), 0)::bigint AS total
-       FROM transactions
-      WHERE user_id = $1 AND credit_card_id = $2 AND deleted_at IS NULL
-        AND kind = 'expense'
-        AND occurred_at >= $3::date AND occurred_at <= $4::date`,
-    [userId, cardId, start, end],
-  );
-  return rows[0].total;
-}
+// Dias de fechamento possíveis (o banco garante closing_day entre 1 e 31).
+const CLOSING_DAYS = Array.from({ length: 31 }, (_, i) => i + 1);
 
 /**
  * Cartões do usuário, já com fatura atual e limite disponível (p/ a UI).
  * Arquivados só com `includeArchived` (e vêm por último).
+ *
+ * UMA consulta para todos os cartões (nunca uma por cartão): a janela da fatura
+ * aberta só depende do dia de fechamento e de hoje, então ela é calculada aqui
+ * (currentCycle — a mesma regra de sempre) para os 31 dias possíveis e o banco
+ * casa cada cartão com a janela do seu closing_day.
  */
 export async function listCards(userId: string, includeArchived = false) {
-  const cards = await query<CardRow>(
-    `SELECT ${CARD_COLUMNS} FROM credit_cards
-      WHERE user_id = $1 ${includeArchived ? '' : 'AND is_archived = false'}
-      ORDER BY is_archived, created_at`,
-    [userId],
+  const ref = todayRef();
+  const cycles = CLOSING_DAYS.map((day) => currentCycle(day, ref));
+  const cards = await query<CardRow & { currentInvoice: number }>(
+    `SELECT ${CARD_COLUMNS},
+            COALESCE(inv.total, 0)::bigint AS "currentInvoice"
+       FROM credit_cards
+       JOIN unnest($2::int[], $3::date[], $4::date[]) AS w(day, cycle_start, cycle_end)
+         ON w.day = credit_cards.closing_day
+       LEFT JOIN LATERAL (
+         SELECT SUM(t.amount) AS total
+           FROM transactions t
+          WHERE t.user_id = $1 AND t.credit_card_id = credit_cards.id AND t.deleted_at IS NULL
+            AND t.kind = 'expense'
+            AND t.occurred_at >= w.cycle_start AND t.occurred_at <= w.cycle_end
+       ) inv ON true
+      WHERE credit_cards.user_id = $1 ${includeArchived ? '' : 'AND credit_cards.is_archived = false'}
+      ORDER BY credit_cards.is_archived, credit_cards.created_at`,
+    [userId, CLOSING_DAYS, cycles.map((c) => c.start), cycles.map((c) => c.end)],
   );
-  return Promise.all(
-    cards.map(async (c) => {
-      const currentInvoice = await invoiceTotal(userId, c.id, c.closingDay);
-      return { ...c, currentInvoice, available: Math.max(0, c.limit - currentInvoice) };
-    }),
-  );
+  return cards.map((c) => ({ ...c, available: Math.max(0, c.limit - c.currentInvoice) }));
 }
 
 export async function createCard(userId: string, input: CreateCardInput) {

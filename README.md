@@ -17,18 +17,23 @@ validação com **Zod** e autenticação por **JWT do Supabase Auth**.
 financas-api/
 ├── db/
 │   └── schema.sql            # DDL completo + seed de categorias + RLS (rode no Supabase)
+├── api/
+│   └── index.ts              # função da Vercel (só reexporta src/vercel.ts) — ver DEPLOY.md
 ├── src/
-│   ├── server.ts             # bootstrap (valida DB, sobe HTTP, shutdown gracioso)
+│   ├── server.ts             # bootstrap tradicional/Render (valida DB, sobe HTTP, cron, shutdown)
+│   ├── vercel.ts             # entrada serverless (Vercel): o mesmo app, sem listen/cron
 │   ├── app.ts                # montagem do Express (helmet, cors, json, rotas)
 │   ├── routes.ts             # agrega os módulos sob /api (com auth)
 │   ├── env.ts                # validação das variáveis de ambiente (fail-fast)
 │   ├── db/pool.ts            # pool do Postgres + type parsers (bigint/date)
+│   ├── db/schema-check.ts    # colunas exigidas (boot no Render, 1ª requisição na Vercel)
 │   ├── lib/                  # AppError, asyncHandler
 │   ├── middlewares/          # auth (JWT), validate (Zod), error (handler central)
 │   └── modules/
 │       ├── transactions/     # CRUD de transações
 │       ├── categories/       # CRUD de categorias
 │       └── summary/          # resumo financeiro do mês
+├── vercel.json               # região iad1, maxDuration 60, rewrites → api/, cron diário
 └── .env.example
 ```
 
@@ -114,7 +119,7 @@ curl -X POST http://localhost:3333/api/transactions/scan \
 # → { "title": "...", "amount": 4590, "date": "2026-07-15", "category": "Alimentação", "categoryId": "..." }
 ```
 
-> 📸 **Scan de recibo:** manda a foto (`multipart/form-data`, campo `image`, até 5MB)
+> 📸 **Scan de recibo:** manda a foto (`multipart/form-data`, campo `image`, até 4 MB — a Vercel recusa requisição acima de 4,5 MB)
 > para o **Google Gemini** (visão, free tier), que devolve um JSON estruturado via
 > `responseSchema`. `amount` vem em **centavos**; `categoryId` já resolvido para as
 > categorias do usuário. Requer `GEMINI_API_KEY` (grátis). **422** se ilegível.

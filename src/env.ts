@@ -30,17 +30,27 @@ const schema = z.object({
     .uuid()
     .optional()
     .or(z.literal('')),
+  // Definida pela própria Vercel em toda função ("1"). Liga o modo serverless:
+  // pool pequeno, checagem do schema na 1ª requisição, sem process.exit.
+  VERCEL: z.string().optional(),
+  // Segredo do Vercel Cron — OBRIGATÓRIO em produção na Vercel: com ele, GET /api/cron/*
+  // só aceita "Authorization: Bearer <CRON_SECRET>" (a Vercel manda sozinha); sem ele, em
+  // produção a rota fica fechada (503) e em dev aceita o user-agent da Vercel Cron.
+  CRON_SECRET: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);
 
 if (!parsed.success) {
-  console.error(
-    '❌ Variáveis de ambiente inválidas:',
-    JSON.stringify(parsed.error.flatten().fieldErrors, null, 2),
-  );
+  const details = JSON.stringify(parsed.error.flatten().fieldErrors, null, 2);
+  console.error('❌ Variáveis de ambiente inválidas:', details);
+  // Na função serverless não existe processo para derrubar: a importação falha e o
+  // log da função mostra o motivo. No servidor tradicional, sai antes do listen.
+  if (process.env.VERCEL) throw new Error(`Variáveis de ambiente inválidas: ${details}`);
   process.exit(1);
 }
 
 export const env = parsed.data;
 export const isProd = env.NODE_ENV === 'production';
+/** Rodando como função serverless da Vercel (e não como servidor com listen). */
+export const isServerless = Boolean(env.VERCEL);

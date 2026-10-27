@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Para a API local que o start-api.sh subiu (PIDs em api.pid). Só derruba processos
-# do backend (tsx/node rodando src/server.ts) — nunca outro programa na porta 3333.
+# do backend (tsx/node rodando src/server.ts ou o serve-handler.ts do teste) — nunca
+# outro programa na porta 3333.
 # Uso: ./stop-api.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -13,7 +14,7 @@ PIDS=""
 [ -f api.pid ] && PIDS="$(cat api.pid)"
 # Sem api.pid: só aceita derrubar o que for o nosso backend escutando na 3333.
 for p in $(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null || true); do
-  if is_backend "$p" && ps -o command= -p "$p" | grep -q "src/server.ts"; then PIDS="$PIDS $p"; fi
+  if is_backend "$p" && ps -o command= -p "$p" | grep -qE "src/server\.ts|serve-handler\.ts"; then PIDS="$PIDS $p"; fi
 done
 PIDS="$(echo $PIDS | tr ' ' '\n' | sort -u | tr '\n' ' ')"
 

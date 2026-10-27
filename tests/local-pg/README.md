@@ -26,6 +26,10 @@ node e2e.mjs         # teste ponta a ponta
 | `./start-db.sh` / `./stop-db.sh` | Sobe/para o Postgres local (dados em `.data/`, log em `postgres.log`, socket na pasta). |
 | `./reset-db.sh [schema.sql]` | Apaga e recria `financas_test`: `supabase-stubs.sql`, o schema (padrão `../../db/schema.sql`, via `apply.mjs`) e os usuários fixos. Grava `fixture.env`. Derruba as conexões abertas (a API reconecta sozinha). |
 | `./start-api.sh` / `./stop-api.sh` | Sobe/para a API (`tsx src/server.ts`). Log em `api.log`, PIDs em `api.pid`. |
+| `./start-api.sh --serverless` | Em vez do `server.ts`, serve o handler da **Vercel** (`api/index.ts` → `src/vercel.ts`) num `http.createServer` (`serve-handler.ts`), com `VERCEL=1` (pool de 3 conexões, schema conferido na 1ª requisição). O `e2e.mjs` roda igual contra ele. `--entry=/abs/…/index.js` serve um handler já compilado (ex.: a saída do `vercel build`). |
+| `./start-api.sh --harness` | `createApp()` do servidor tradicional (sem o boot do `server.ts`) no mesmo `serve-handler.ts` — para medir o caminho tradicional. |
+| `--query-delay=N` | (com `--serverless`/`--harness`) atrasa cada consulta ao banco em N ms — simula a distância até o Supabase (ex.: 70 = Render/Oregon → Virgínia). |
+| `node measure-queries.mjs [--reps=3] [--json]` | Com a API num dos modos acima: quantas consultas ao Postgres e quanto tempo cada endpoint de abertura/troca de página leva (`/auth/me` só 1 vez, pelo limite de `/auth/*`). Só GET. |
 | `node check-api.mjs` | Confere que a API na 3333 é a nossa e que o único banco dela é o `:54329`. |
 | `node seed-demo.mjs [--reset]` | Demo pela API: 5 contas, 2 cartões, 3 meses de lançamentos em várias categorias (alguns sem categoria), transferências, parcelados, faturas pagas, recorrentes e 1 empréstimo (1 parcela recebida, 1 atrasada). Recusa semear em cima de dados; `--reset` reseta antes. |
 | `node e2e.mjs [--only=trecho] [--no-demo]` | Reseta, monta o fixture próprio (março/2025), roda as seções e, no fim, re-semeia a demo (`--no-demo` deixa o fixture para inspecionar). |
@@ -50,7 +54,18 @@ node e2e.mjs         # teste ponta a ponta
 ## Avisos
 
 - A API lê o código **uma vez**. Mudou o `src/`? `./stop-api.sh && ./start-api.sh`.
+- Para trocar de modo (tradicional ↔ `--serverless`/`--harness`): `./stop-api.sh` antes.
+- O contador de consultas (`GET /__harness/queries`) e o atraso só existem no `serve-handler.ts`
+  (servidor de teste) — nada disso está no backend.
 - `reset-db.sh` e `e2e.mjs` apagam tudo do banco local (o e2e devolve a demo no fim).
+- Taxas do BCB: neste Mac o `fetch` do Node para `api.bcb.gov.br` tenta IPv6 e falha (HTTP 502
+  ou timeout; o `curl` funciona). Por isso o "📈 Indicadores atualizados" do boot e o
+  `GET /api/cron/indicators` com `user-agent: vercel-cron/1.0` costumam dar
+  `BCB_UNAVAILABLE` aqui — é a rede desta máquina, não o código (com
+  `NODE_OPTIONS=--dns-result-order=ipv4first` no processo da API o BCB responde). A rota do
+  cron só existe no `--serverless` (no tradicional/`--harness` dá 404); o e2e só confere os
+  401/404 dela (sem rede). Em produção sem `CRON_SECRET` ela responde 503 — não dá para ver
+  aqui (a API local sobe com `NODE_ENV=development`).
 - `/api/auth/*` tem limite de 30 chamadas por 15 min por IP. O e2e não chama `/auth/me`;
   ao testar o frontend, carregue a página uma vez e navegue por cliques.
 - Frontend: `npm run dev` do `financas-app` (porta 5186) já aponta para `http://localhost:3333`.

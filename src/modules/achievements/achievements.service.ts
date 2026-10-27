@@ -68,6 +68,18 @@ async function count(sql: string, params: unknown[]): Promise<number> {
   return rows[0]?.c ?? 0;
 }
 
+/** As contagens das tabelas do núcleo numa consulta só (uma ida ao banco em vez de quatro). */
+async function coreCounts(userId: string) {
+  const rows = await query<Omit<Stats, 'goalsDone'>>(
+    `SELECT (SELECT count(*)::int FROM investments WHERE user_id = $1) AS investments,
+            (SELECT count(*)::int FROM transactions WHERE user_id = $1 AND deleted_at IS NULL) AS transactions,
+            (SELECT count(*)::int FROM credit_cards WHERE user_id = $1) AS cards,
+            (SELECT count(*)::int FROM recurring_expenses WHERE user_id = $1) AS recurring`,
+    [userId],
+  );
+  return rows[0];
+}
+
 /** Conta que não quebra se a tabela ainda não existir (ex.: goals antes do módulo). */
 async function safeCount(sql: string, params: unknown[]): Promise<number> {
   try {
@@ -82,15 +94,13 @@ async function safeCount(sql: string, params: unknown[]): Promise<number> {
  * flag `unlocked` em cada medalha + o total desbloqueado.
  */
 export async function getAchievements(userId: string) {
-  const [investments, transactions, cards, recurring, goalsDone] = await Promise.all([
-    count(`SELECT count(*)::int AS c FROM investments WHERE user_id = $1`, [userId]),
-    count(`SELECT count(*)::int AS c FROM transactions WHERE user_id = $1 AND deleted_at IS NULL`, [userId]),
-    count(`SELECT count(*)::int AS c FROM credit_cards WHERE user_id = $1`, [userId]),
-    count(`SELECT count(*)::int AS c FROM recurring_expenses WHERE user_id = $1`, [userId]),
+  // Metas ficam numa consulta à parte: se a tabela não existir, só ela vira 0.
+  const [core, goalsDone] = await Promise.all([
+    coreCounts(userId),
     safeCount(`SELECT count(*)::int AS c FROM goals WHERE user_id = $1 AND current_amount >= target_amount`, [userId]),
   ]);
 
-  const stats: Stats = { investments, transactions, cards, recurring, goalsDone };
+  const stats: Stats = { ...core, goalsDone };
   const data = ACHIEVEMENTS.map(({ check, ...rest }) => ({ ...rest, unlocked: check(stats) }));
   return { data, unlockedCount: data.filter((a) => a.unlocked).length, total: data.length };
 }

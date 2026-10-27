@@ -227,29 +227,17 @@ export async function createTransaction(userId: string, input: CreateTransaction
   return rows[0]; // a resposta 201 devolve a 1ª parcela
 }
 
-/** Filtro de conta/cartão vindo do cliente: confere a posse antes de usar. */
-async function assertFilterOwnership(userId: string, filters: ListTransactionsQuery): Promise<void> {
-  await Promise.all([
-    filters.accountId
-      ? query('SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2', [filters.accountId, userId]).then(
-          (rows) => {
-            if (rows.length === 0) throw AppError.notFound('Conta não encontrada');
-          },
-        )
-      : null,
-    filters.creditCardId
-      ? findCard(userId, filters.creditCardId).then((card) => {
-          if (!card) throw AppError.notFound('Cartão não encontrado');
-        })
-      : null,
-  ]);
-}
-
+/**
+ * Lista com filtros e paginação. Duas consultas EM PARALELO (uma ida e volta ao
+ * banco): a página e o total. O filtro de conta/cartão vindo do cliente tem a
+ * posse conferida na própria consulta do total (EXISTS) — id de outro usuário →
+ * 404, como antes, sem uma ida extra ao banco.
+ */
 export async function listTransactions(userId: string, filters: ListTransactionsQuery) {
-  await assertFilterOwnership(userId, filters);
-
   const where: string[] = ['t.user_id = $1', 't.deleted_at IS NULL'];
   const params: unknown[] = [userId];
+  // Colunas extras da consulta do total: posse dos ids de conta/cartão do filtro.
+  const ownership: string[] = [];
 
   if (filters.kind) {
     params.push(filters.kind);
@@ -271,11 +259,14 @@ export async function listTransactions(userId: string, filters: ListTransactions
     where.push(
       `((t.account_id = ${p} AND (t.credit_card_id IS NULL OR t.kind = 'transfer')) OR t.transfer_account_id = ${p})`,
     );
+    ownership.push(`EXISTS (SELECT 1 FROM accounts WHERE id = ${p} AND user_id = $1) AS "accountOwned"`);
   }
   if (filters.creditCardId) {
     // Compras/estornos do cartão + pagamentos da fatura.
     params.push(filters.creditCardId);
-    where.push(`t.credit_card_id = $${params.length}`);
+    const p = `$${params.length}`;
+    where.push(`t.credit_card_id = ${p}`);
+    ownership.push(`EXISTS (SELECT 1 FROM credit_cards WHERE id = ${p} AND user_id = $1) AS "cardOwned"`);
   }
   if (filters.search) {
     // Busca parcial case-insensitive no nome (descrição) e no estabelecimento.
@@ -299,24 +290,30 @@ export async function listTransactions(userId: string, filters: ListTransactions
   params.push(filters.offset);
   const offsetIdx = params.length;
 
-  const data = await query(
-    `SELECT ${TX_COLUMNS}
-       FROM transactions t
-      WHERE ${whereSql}
-      ORDER BY t.occurred_at DESC, t.created_at DESC
-      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-    params,
-  );
+  const [data, totalRows] = await Promise.all([
+    query(
+      `SELECT ${TX_COLUMNS}
+         FROM transactions t
+        WHERE ${whereSql}
+        ORDER BY t.occurred_at DESC, t.created_at DESC
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params,
+    ),
+    query<{ count: number; accountOwned?: boolean; cardOwned?: boolean }>(
+      `SELECT COUNT(*)::int AS count${ownership.map((col) => `, ${col}`).join('')}
+         FROM transactions t WHERE ${whereSql}`,
+      whereParams,
+    ),
+  ]);
 
-  const totalRows = await query<{ count: number }>(
-    `SELECT COUNT(*)::int AS count FROM transactions t WHERE ${whereSql}`,
-    whereParams,
-  );
+  const total = totalRows[0];
+  if (total.accountOwned === false) throw AppError.notFound('Conta não encontrada');
+  if (total.cardOwned === false) throw AppError.notFound('Cartão não encontrado');
 
   return {
     data,
     pagination: {
-      total: totalRows[0].count,
+      total: total.count,
       limit: filters.limit,
       offset: filters.offset,
     },

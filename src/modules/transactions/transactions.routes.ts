@@ -17,21 +17,30 @@ import {
 
 export const transactionsRouter = Router();
 
-// Upload em memória (buffer), só imagens, até 5MB.
+// Upload em memória (buffer), só imagens, até 4 MB. A Vercel recusa requisição com mais
+// de 4,5 MB antes de chegar aqui — 4 MB de imagem + o envelope do multipart cabem.
+// O app reduz a foto no navegador antes de enviar (normalmente < 1 MB).
+const MAX_IMAGE_MB = 4;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: MAX_IMAGE_MB * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (/^image\/(jpe?g|png|webp|gif)$/.test(file.mimetype)) cb(null, true);
     else cb(new Error('Formato inválido: envie uma imagem JPEG, PNG, WebP ou GIF'));
   },
 });
 
-// Wrapper que traduz os erros do multer em AppError (400/413) legíveis.
+// Wrapper que traduz os erros do multer em AppError (400) legíveis.
 const uploadImage: RequestHandler = (req, res, next) => {
   upload.single('image')(req, res, (err) => {
     if (err instanceof MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') return next(AppError.badRequest('Imagem muito grande (máx. 5MB)'));
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return next(
+          AppError.badRequest(
+            `Imagem muito grande (máx. ${MAX_IMAGE_MB} MB). Envie uma foto menor ou com resolução mais baixa.`,
+          ),
+        );
+      }
       return next(AppError.badRequest(err.message));
     }
     if (err) return next(AppError.badRequest((err as Error).message));

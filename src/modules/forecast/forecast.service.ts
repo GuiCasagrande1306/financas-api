@@ -32,26 +32,26 @@ const ymKey = (y: number, mIndex: number) => `${y}-${String(mIndex + 1).padStart
  */
 export async function getForecast(userId: string, months: number) {
   const today = todaySP();
-  const [balances, incomeRow, recurringRow, cardRows, scheduledRows, loanRows] = await Promise.all([
+  const [balances, totalsRow, cardRows, scheduledRows, loanRows] = await Promise.all([
     getAccountBalances(userId),
-    // Receita média mensal estimada = entradas dos últimos 90 dias (até hoje) ÷ 3.
-    // Receita agendada (data futura) fica fora da média: ela entra no mês dela.
-    // Juros de empréstimo (income com loan_id) também: as parcelas futuras entram
-    // inteiras em `loanReceipts` — contá-los na média seria contar duas vezes.
-    query<{ total: number }>(
-      `SELECT COALESCE(SUM(amount), 0)::bigint AS total
-         FROM transactions
-        WHERE user_id = $1 AND deleted_at IS NULL AND kind = 'income'
-          AND loan_id IS NULL
-          AND occurred_at >= $2::date - interval '90 days'
-          AND occurred_at <= $2::date`,
+    // Dois totais numa consulta só:
+    //  - income: receita média mensal estimada = entradas dos últimos 90 dias (até
+    //    hoje) ÷ 3. Receita agendada (data futura) fica fora da média: ela entra no
+    //    mês dela. Juros de empréstimo (income com loan_id) também: as parcelas
+    //    futuras entram inteiras em `loanReceipts` — contá-los na média seria contar
+    //    duas vezes;
+    //  - recurring: total mensal das contas fixas ativas.
+    query<{ income: number; recurring: number }>(
+      `SELECT
+          (SELECT COALESCE(SUM(amount), 0)::bigint
+             FROM transactions
+            WHERE user_id = $1 AND deleted_at IS NULL AND kind = 'income'
+              AND loan_id IS NULL
+              AND occurred_at >= $2::date - interval '90 days'
+              AND occurred_at <= $2::date) AS income,
+          (SELECT COALESCE(SUM(amount), 0)::bigint
+             FROM recurring_expenses WHERE user_id = $1 AND is_active = true) AS recurring`,
       [userId, today],
-    ),
-    // Total mensal das contas fixas ativas.
-    query<{ total: number }>(
-      `SELECT COALESCE(SUM(amount), 0)::bigint AS total
-         FROM recurring_expenses WHERE user_id = $1 AND is_active = true`,
-      [userId],
     ),
     // Parcelas de cartão FUTURAS (a partir do próximo mês), agrupadas por mês.
     query<{ ym: string; total: number }>(
@@ -71,8 +71,8 @@ export async function getForecast(userId: string, months: number) {
 
   const balance = balances.totals.balance;
 
-  const estimatedMonthlyIncome = Math.round(incomeRow[0].total / 3);
-  const recurringMonthly = recurringRow[0].total;
+  const estimatedMonthlyIncome = Math.round(totalsRow[0].income / 3);
+  const recurringMonthly = totalsRow[0].recurring;
   const cardByMonth = new Map(cardRows.map((r) => [r.ym, r.total]));
 
   const [y0, m1] = today.split('-').map(Number);

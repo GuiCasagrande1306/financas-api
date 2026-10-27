@@ -23,6 +23,7 @@ interface MonthRow {
   month: number; // 1–12
   income: number;
   expense: number;
+  uncategorized: number; // despesas sem categoria no mês
 }
 
 /** Total de despesas de UMA categoria (só as categorizadas). */
@@ -75,7 +76,8 @@ export function withCategoryShare(
  *
  * A matemática pesada (somar o ano inteiro e agrupar categorias) roda no banco
  * com GROUP BY — o servidor nunca carrega as transações individuais na memória.
- * As duas análises são consultadas EM PARALELO (Promise.all).
+ * As duas análises são consultadas EM PARALELO (Promise.all) — 2 consultas; a
+ * fatia "Sem categoria" sai da consulta por mês (mesmo filtro).
  *
  * Retorna:
  *  - monthlyComparison: 12 posições (Jan→Dez) com receita e despesa do mês.
@@ -85,12 +87,14 @@ export function withCategoryShare(
 export async function getAnnualReport(userId: string, year?: number) {
   const targetYear = year ?? currentYearSP();
 
-  const [monthlyRows, categoryRows, uncategorizedRow] = await Promise.all([
-    // Receitas e despesas somadas por mês daquele ano.
+  const [monthlyRows, categoryRows] = await Promise.all([
+    // Receitas e despesas somadas por mês daquele ano (+ as despesas sem categoria).
     query<MonthRow>(
       `SELECT EXTRACT(MONTH FROM occurred_at)::int AS month,
               COALESCE(SUM(amount) FILTER (WHERE kind = 'income'), 0)::bigint  AS income,
-              COALESCE(SUM(amount) FILTER (WHERE kind = 'expense'), 0)::bigint AS expense
+              COALESCE(SUM(amount) FILTER (WHERE kind = 'expense'), 0)::bigint AS expense,
+              COALESCE(SUM(amount) FILTER (WHERE kind = 'expense' AND category_id IS NULL), 0)::bigint
+                AS uncategorized
          FROM transactions
         WHERE user_id = $1
           AND deleted_at IS NULL
@@ -115,19 +119,6 @@ export async function getAnnualReport(userId: string, year?: number) {
         ORDER BY total DESC`,
       [userId, targetYear],
     ),
-
-    // Despesas do ano sem categoria (viram a fatia "Sem categoria").
-    query<{ total: number }>(
-      `SELECT COALESCE(SUM(amount), 0)::bigint AS total
-         FROM transactions
-        WHERE user_id = $1
-          AND deleted_at IS NULL
-          AND kind = 'expense'
-          AND category_id IS NULL
-          AND occurred_at >= make_date($2::int, 1, 1)
-          AND occurred_at <  make_date($2::int + 1, 1, 1)`,
-      [userId, targetYear],
-    ),
   ]);
 
   // Preenche as 12 posições (meses sem lançamento ficam zerados).
@@ -144,7 +135,8 @@ export async function getAnnualReport(userId: string, year?: number) {
   });
 
   // Categorizadas + fatia "Sem categoria", com o % sobre as despesas do ano.
-  const expensesByCategory = withCategoryShare(categoryRows, uncategorizedRow[0].total, yearExpense);
+  const yearUncategorized = monthlyRows.reduce((sum, r) => sum + r.uncategorized, 0);
+  const expensesByCategory = withCategoryShare(categoryRows, yearUncategorized, yearExpense);
 
   return {
     year: targetYear,
@@ -281,29 +273,45 @@ function applyFilters(base: unknown[], ...filters: SqlFilter[]): { sql: string; 
 }
 
 /**
- * Filtro opcional por origem. Confere a posse do id antes de usar (404 se não
- * for do usuário).
+ * Filtro + a conferência de posse do id dele. A conferência (`check`, 404 se o id
+ * não for do usuário) roda JUNTO com as consultas do relatório — todas filtram
+ * por user_id, então com um id alheio elas só voltam vazias e o 404 prevalece.
  */
-async function sourceFilter(userId: string, source?: string): Promise<SqlFilter> {
-  if (!source) return NO_FILTER;
+interface CheckedFilter {
+  filter: SqlFilter;
+  check: Promise<void> | null;
+}
+
+/** Consulta de posse: 404 com `message` se não voltar linha. */
+function assertExists(sql: string, params: unknown[], message: string): Promise<void> {
+  return query(sql, params).then((rows) => {
+    if (rows.length === 0) throw AppError.notFound(message);
+  });
+}
+
+/** Filtro opcional por origem ('account:<id>' | 'card:<id>'), com a posse conferida. */
+function sourceFilter(userId: string, source?: string): CheckedFilter {
+  if (!source) return { filter: NO_FILTER, check: null };
   const sep = source.indexOf(':');
   const type = source.slice(0, sep);
   const id = source.slice(sep + 1);
 
   if (type === 'account') {
-    const rows = await query('SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2', [id, userId]);
-    if (rows.length === 0) throw AppError.notFound('Conta não encontrada');
-    // Só o que saiu/entrou DIRETO na conta (compra no cartão também tem account_id).
-    return (params) => {
-      params.push(id);
-      return `AND t.credit_card_id IS NULL AND t.account_id = $${params.length}`;
+    return {
+      check: assertExists('SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2', [id, userId], 'Conta não encontrada'),
+      // Só o que saiu/entrou DIRETO na conta (compra no cartão também tem account_id).
+      filter: (params) => {
+        params.push(id);
+        return `AND t.credit_card_id IS NULL AND t.account_id = $${params.length}`;
+      },
     };
   }
-  const rows = await query('SELECT 1 FROM credit_cards WHERE id = $1 AND user_id = $2', [id, userId]);
-  if (rows.length === 0) throw AppError.notFound('Cartão não encontrado');
-  return (params) => {
-    params.push(id);
-    return `AND t.credit_card_id = $${params.length}`;
+  return {
+    check: assertExists('SELECT 1 FROM credit_cards WHERE id = $1 AND user_id = $2', [id, userId], 'Cartão não encontrado'),
+    filter: (params) => {
+      params.push(id);
+      return `AND t.credit_card_id = $${params.length}`;
+    },
   };
 }
 
@@ -311,18 +319,20 @@ async function sourceFilter(userId: string, source?: string): Promise<SqlFilter>
  * Filtro opcional por categoria: 'none' = sem categoria; id = só aquela
  * categoria, que precisa ser visível ao usuário (dele ou do sistema) — senão 404.
  */
-async function categoryFilter(userId: string, category?: string): Promise<SqlFilter> {
-  if (!category) return NO_FILTER;
-  if (category === CATEGORY_NONE) return () => 'AND t.category_id IS NULL';
+function categoryFilter(userId: string, category?: string): CheckedFilter {
+  if (!category) return { filter: NO_FILTER, check: null };
+  if (category === CATEGORY_NONE) return { filter: () => 'AND t.category_id IS NULL', check: null };
 
-  const rows = await query(
-    'SELECT 1 FROM categories WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
-    [category, userId],
-  );
-  if (rows.length === 0) throw AppError.notFound('Categoria não encontrada');
-  return (params) => {
-    params.push(category);
-    return `AND t.category_id = $${params.length}`;
+  return {
+    check: assertExists(
+      'SELECT 1 FROM categories WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+      [category, userId],
+      'Categoria não encontrada',
+    ),
+    filter: (params) => {
+      params.push(category);
+      return `AND t.category_id = $${params.length}`;
+    },
   };
 }
 
@@ -390,23 +400,25 @@ interface TopRow {
  *    média é do que já passou);
  *  - intervalo todo no passado ou todo no futuro → o intervalo inteiro.
  *
- * 4 consultas em paralelo (Promise.all), agregadas no banco (FILTER/GROUP BY).
+ * 4 consultas em paralelo (Promise.all), agregadas no banco (FILTER/GROUP BY), e
+ * — com filtro de origem/categoria — a conferência de posse do id junto com elas
+ * (uma ida e volta ao banco em vez de duas).
  */
 export async function getSourcesReport(userId: string, params: SourcesQuery) {
   const { from, to } = params;
   const days = assertDateRange(from, to, SOURCES_MAX_DAYS);
   const granularity: Granularity = params.granularity ?? autoGranularity(days);
-  const [bySource, byCategoryFilter] = await Promise.all([
-    sourceFilter(userId, params.source),
-    categoryFilter(userId, params.category),
-  ]);
+  const bySource = sourceFilter(userId, params.source);
+  const byCategoryFilter = categoryFilter(userId, params.category);
   const base = [userId, from, to];
   // Cada consulta numera os próprios $n (a partir do $4) com os filtros que usa.
-  const forSources = applyFilters(base, byCategoryFilter); // ranking: só a categoria
-  const forCategories = applyFilters(base, bySource); // rosca: só a origem
-  const filtered = applyFilters(base, bySource, byCategoryFilter); // o resto: os dois
+  const forSources = applyFilters(base, byCategoryFilter.filter); // ranking: só a categoria
+  const forCategories = applyFilters(base, bySource.filter); // rosca: só a origem
+  const filtered = applyFilters(base, bySource.filter, byCategoryFilter.filter); // o resto: os dois
 
-  const [sourceRows, dailyRows, categoryRows, topRows] = await Promise.all([
+  const [, , sourceRows, dailyRows, categoryRows, topRows] = await Promise.all([
+    bySource.check,
+    byCategoryFilter.check,
     // Totais por origem no intervalo (sem o filtro `source`; com o de categoria).
     query<SourceTotalsRow>(
       `WITH s AS (
